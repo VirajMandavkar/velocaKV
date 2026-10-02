@@ -1,6 +1,9 @@
 package page
 
-import "sync/atomic"
+import (
+	"bytes"
+	"sync/atomic"
+)
 
 // slot is one 8-byte directory entry:
 //
@@ -73,4 +76,28 @@ func (p *Page) slotAt(i int) slot {
 // setSlotAt writes slot i with one atomic store. Caller holds the write lock.
 func (p *Page) setSlotAt(i int, s slot) {
 	atomic.StoreUint64(p.word(slotOff(i)), uint64(s))
+}
+
+func recordOK(s slot, heapStart int) bool {
+	end := s.off() + s.keyLen() + s.valLen()
+	badOvf := s.ovf() && s.valLen() != ovfStubSize
+	return s.off() >= heapStart && end <= PageSize && s.keyLen() <= MaxKeyLen && !badOvf
+}
+
+func cmpHead(a, b uint32) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+func (p *Page) cmpSlot(s slot, suffix []byte, head uint32) int {
+	c := cmpHead(head, s.head())
+	if c == 0 {
+		return bytes.Compare(suffix, p[s.off():s.off()+s.keyLen()])
+	}
+	return c
 }

@@ -130,6 +130,62 @@ func TestSlotLocation(t *testing.T) {
 	}
 }
 
+func TestRecordOK(t *testing.T) {
+	tests := []struct {
+		name      string
+		off       int
+		keyLen    int
+		valLen    int
+		ovf       bool
+		heapStart int
+		want      bool
+	}{
+		{"ends exactly at page end", PageSize - 105, 5, 100, false, PageSize - 105, true},
+		{"one byte past the end", PageSize - 104, 5, 100, false, PageSize - 105, false},
+		{"starts below heapStart", PageSize - 106, 5, 100, false, PageSize - 105, false},
+		{"key at max length", PageSize - MaxKeyLen, MaxKeyLen, 0, false, PageSize - MaxKeyLen, true},
+		{"key one past max", PageSize - MaxKeyLen - 1, MaxKeyLen + 1, 0, false, PageSize - MaxKeyLen - 1, false},
+		{"zero length record", PageSize - 105, 0, 0, false, PageSize - 105, true},
+		{"overflow stub, correct size", PageSize - 13, 5, ovfStubSize, true, PageSize - 13, true},
+		{"overflow. wrong valLen", PageSize - 105, 5, 100, true, PageSize - 105, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := makeSlot(tt.off, tt.keyLen, tt.valLen, tt.ovf, 0)
+			if got := recordOK(s, tt.heapStart); got != tt.want {
+				t.Errorf("recordOK() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCmpSlot(t *testing.T) {
+	tests := []struct {
+		name   string
+		search string
+		stored string
+		want   int
+	}{
+		{"head decides, less", "apple", "apron", -1},
+		{"head decides, greater", "banana", "apron", 1},
+		{"tie, heap decides", "apricot", "apron", -1},
+		{"exact match", "apron", "apron", 0},
+		{"padding tie", "ca", "ca\x00", -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newTestPage()
+			off := PageSize - len(tt.stored)
+			copy(p[off:], tt.stored)
+			s := makeSlot(off, len(tt.stored), 0, false, keyHead([]byte(tt.stored)))
+			got := p.cmpSlot(s, []byte(tt.search), keyHead([]byte(tt.search)))
+			if got != tt.want {
+				t.Fatalf("cmpSlot(%q, %q) = %d, want %d", tt.search, tt.stored, got, tt.want)
+			}
+		})
+	}
+}
+
 var sinkSlot slot
 var sinkHead uint32
 
