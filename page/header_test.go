@@ -105,6 +105,9 @@ func TestHeaderInitEmptyLeaf(t *testing.T) {
 	p.Init(KindLeaf)
 	for _, f := range fields {
 		want := uint64(0)
+		if f.name == "gen" {
+			want = maxFor(f.size)
+		}
 		if f.name == "heapStart" {
 			want = PageSize
 		}

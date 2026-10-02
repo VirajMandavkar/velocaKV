@@ -101,9 +101,12 @@ func (p *Page) SetPrefixLen(v uint16)    { p.set(word6, shiftPrefixLen, mask16, 
 // Init resets the header of a new, empty page.
 // Bytes 0-7 (the version word) are left alone: they belong to the lock (Chat 4).
 func (p *Page) Init(kind uint8) {
-	for off := word1; off < HeaderSize; off += 8 {
+	old := atomic.LoadUint64(p.word(word1))
+	keep := old & mask32
+	newWord := keep | uint64(kind)<<shiftKind
+	atomic.StoreUint64(p.word(word1), newWord)
+	for off := word1 + 8; off < HeaderSize; off += 8 {
 		atomic.StoreUint64(p.word(off), 0)
 	}
-	p.SetKind(kind)
 	p.SetHeapStart(PageSize)
 }
