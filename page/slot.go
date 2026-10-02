@@ -101,3 +101,39 @@ func (p *Page) cmpSlot(s slot, suffix []byte, head uint32) int {
 	}
 	return c
 }
+
+func (p *Page) SeekSlot(suffix []byte) (idx int, found, ok bool) {
+	// if string(suffix) == "" {
+	// 	return 0, false, false
+	// }
+	head := keyHead(suffix)
+	lo := 0
+	n := int(p.SlotCount())
+	heapStart := int(p.HeapStart())
+	if slotOff(n) > heapStart {
+		return 0, false, false
+	}
+	hi := n
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		s := p.slotAt(mid)
+		if !recordOK(s, heapStart) {
+			return 0, false, false
+		}
+		c := p.cmpSlot(s, suffix, head)
+		if c > 0 {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	idx = lo
+	if idx < n {
+		s := p.slotAt(idx)
+		if !recordOK(s, heapStart) {
+			return 0, false, false
+		}
+		found = p.cmpSlot(s, suffix, head) == 0
+	}
+	return idx, found, true
+}

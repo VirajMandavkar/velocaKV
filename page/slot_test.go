@@ -186,26 +186,135 @@ func TestCmpSlot(t *testing.T) {
 	}
 }
 
+func TestLowerBound(t *testing.T) {
+	tests := []struct {
+		search string
+		keys   []string
+		idx    int
+		found  bool
+	}{
+		{"d", []string{"b", "d", "f"}, 1, true},
+		{"e", []string{"b", "d", "f"}, 2, false},
+		{"a", []string{"b", "d", "f"}, 0, false},
+		{"z", []string{"b", "d", "f"}, 3, false},
+		{"a", []string{}, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.search, func(t *testing.T) {
+			idx, found := lowerBound(tt.keys, tt.search)
+			if idx != tt.idx || found != tt.found {
+				t.Errorf("lowerBound(%q) = (%d, %v), want (%d, %v)",
+					tt.search, idx, found, tt.idx, tt.found)
+			}
+		})
+	}
+}
+
+func pageWithKeys(t *testing.T, keys []string) *Page {
+	t.Helper()
+	p := newTestPage()
+	if err := p.Format(KindLeaf, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	top := int(p.HeapStart())
+	for i, key := range keys {
+		top -= len(key)
+		copy(p[top:], key)
+		p.setSlotAt(i, makeSlot(top, len(key), 0, false, keyHead([]byte(key))))
+	}
+	p.SetHeapStart(uint16(top))
+	p.SetSlotCount(uint16(len(keys)))
+	return p
+}
+
+func TestSeekSlot(t *testing.T) {
+	tests := []struct {
+		name   string
+		keys   []string
+		search string
+		idx    int
+		found  bool
+	}{
+		{"hit middle", []string{"b", "d", "f"}, "d", 1, true},
+		{"miss between", []string{"b", "d", "f"}, "e", 2, false},
+		{"before all", []string{"b", "d", "f"}, "a", 0, false},
+		{"after all", []string{"b", "d", "f"}, "z", 3, false},
+		{"empty page (none)", []string{}, "a", 0, false},
+		{"head tie, shorter key", []string{"apple", "apricot", "apron"}, "apr", 1, false},
+		{"head tie, hit", []string{"apple", "apricot", "apron"}, "apricot", 1, true},
+		{"head tie, past all", []string{"apple", "apricot", "apron"}, "aprz", 3, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := pageWithKeys(t, tt.keys)
+			idx, found, ok := p.SeekSlot([]byte(tt.search))
+			if idx != tt.idx || found != tt.found || !ok {
+				t.Errorf("SeekSlot(%q) = (%d, %v, %v), want (%d, %v, true)",
+					tt.search, idx, found, ok, tt.idx, tt.found)
+			}
+		})
+	}
+}
+
+func TestSeekSlotRejects(t *testing.T) {
+	tests := []struct {
+		name    string
+		corrupt func(*Page)
+	}{
+		{"slots run into heap", func(p *Page) {
+			p.SetSlotCount(uint16((int(p.HeapStart())-HeaderSize)/SlotSize + 1))
+		}},
+		{"bad slot offset", func(p *Page) {
+			p.setSlotAt(1, makeSlot(PageSize-2, 5, 0, false, 0))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := pageWithKeys(t, []string{"b", "d", "f"})
+			tt.corrupt(p)
+			if _, _, ok := p.SeekSlot([]byte("d")); ok {
+				t.Fatal("SeekSlot() ok = true, want false")
+			}
+		})
+	}
+}
+
 var sinkSlot slot
 var sinkHead uint32
 
 func BenchmarkSlotAtHead(b *testing.B) {
 	p := newTestPage()
 	p.setSlotAt(5, makeSlot(8000, 5, 100, false, 0x617070))
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		sinkHead += p.slotAt(5).head()
 	}
 }
 
 func BenchmarkKeyHead(b *testing.B) {
 	k := []byte("apple")
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		sinkHead += keyHead(k)
 	}
 }
 
 func BenchmarkMakeSlot(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		sinkSlot = makeSlot(i&offsetMask, 5, 100, false, 0x617070)
 	}
+}
+
+func lowerBound(keys []string, k string) (idx int, found bool) {
+	lo := 0
+	hi := len(keys)
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if keys[mid] < k {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	idx = lo
+	found = idx < len(keys) && keys[idx] == k
+	return idx, found
 }
