@@ -133,7 +133,7 @@ func BenchmarkSlotCount(b *testing.B) {
 	p := newTestPage()
 	p.SetSlotCount(300)
 	var sink uint16
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		sink += p.SlotCount()
 	}
 	_ = sink
@@ -141,7 +141,7 @@ func BenchmarkSlotCount(b *testing.B) {
 
 func BenchmarkSetSlotCount(b *testing.B) {
 	p := newTestPage()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		p.SetSlotCount(uint16(i))
 	}
 }

@@ -4,7 +4,7 @@ Sep 29, 2026 · @Viraj Mandavkar
 
 ## Decision summary
 
-v3 keeps the v2 slotted-page idea but rebuilds every page as 8 KiB of raw arena memory with a 64-byte header, 8-byte atomic slots carrying a 3-byte key head, stored fence keys, and restart-from-root OLC. This section supersedes the conflicting parts of the original v3 plan (4-byte slots, 24-byte header, 2 KiB inline value).
+v3 keeps the v2 slotted-page idea but rebuilds every page as 8 KiB of raw arena memory with a 64-byte header, 8-byte atomic slots carrying a 3-byte key head, stored fence keys, and restart-from-root OLC. 
 
 | Area | v2 | v3 decision | Fixes |
 | --- | --- | --- | --- |

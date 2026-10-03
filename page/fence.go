@@ -144,5 +144,11 @@ func (p *Page) Check() error {
 	if got, want := int(p.PrefixLen()), commonPrefixLen(low, high); got != want {
 		return fmt.Errorf("%w: prefixLen %d, fences share %d", ErrPageInvariant, got, want)
 	}
+
+	sum := p.freeSpace() + int(p.SlotCount())*SlotSize + p.fenceBytes() + p.liveBytes() + int(p.DeadBytes())
+	if Usable != sum {
+		return fmt.Errorf("%w: Expected Usable %d, got  %d", ErrPageInvariant, Usable, sum)
+	}
+
 	return nil
 }

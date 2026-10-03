@@ -117,6 +117,7 @@ func TestCheckCatches(t *testing.T) {
 		{"fences overlap", func(p *Page) { p.SetLowFenceOff(p.HighFenceOff()) }},
 		{"low >= high", func(p *Page) { p[p.LowFenceOff()+5] = 'z' }}, // "user:alice" -> "user:zlice"
 		{"prefixLen wrong", func(p *Page) { p.SetPrefixLen(p.PrefixLen() + 1) }},
+		{"accounting drift", func(p *Page) { p.SetDeadBytes(1) }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

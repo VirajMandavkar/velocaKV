@@ -224,6 +224,9 @@ func pageWithKeys(t *testing.T, keys []string) *Page {
 	}
 	p.SetHeapStart(uint16(top))
 	p.SetSlotCount(uint16(len(keys)))
+	if err := p.Check(); err != nil {
+		t.Fatal(err)
+	}
 	return p
 }
 
