@@ -97,6 +97,46 @@ func TestInsertErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("empty key", func(t *testing.T) {
+		p := newTestPage()
+		if err := p.Format(KindLeaf, nil, nil); err != nil {
+			t.Fatalf("Format() error = %v", err)
+		}
+		err := p.Insert([]byte(""), []byte(""))
+		if !errors.Is(err, ErrEmptyKey) {
+			t.Fatalf("Insert() error= %v, want %v", err, ErrEmptyKey)
+		}
+		if err := p.Check(); err != nil {
+			t.Fatalf("Check() after rejected insert: %v", err)
+		}
+	})
+	t.Run("empty value is fine", func(t *testing.T) {
+		p := newTestPage()
+		if err := p.Format(KindLeaf, nil, nil); err != nil {
+			t.Fatalf("Format() error = %v", err)
+		}
+		err := p.Insert([]byte("a"), []byte(""))
+		if err != nil {
+			t.Fatalf("Insert() error= %v, want nil", err)
+		}
+		if err := p.Check(); err != nil {
+			t.Fatalf("Check() after rejected insert: %v", err)
+		}
+	})
+
+	t.Run("empty suffix on a fenced page", func(t *testing.T) {
+		p := newTestPage()
+		if err := p.Format(KindLeaf, []byte("user"), []byte("user:z")); err != nil {
+			t.Fatalf("Format() error = %v", err)
+		}
+		err := p.Insert([]byte(""), []byte("v"))
+		if err != nil {
+			t.Fatalf("Insert() error= %v, want nil", err)
+		}
+		if err := p.Check(); err != nil {
+			t.Fatalf("Check() after rejected insert: %v", err)
+		}
+	})
 }
 
 func fillPage(t *testing.T, p *Page) {

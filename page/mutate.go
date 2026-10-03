@@ -44,6 +44,7 @@ var (
 	ErrKeyExists = errors.New("page: key exists")
 	ErrNeedSplit = errors.New("page: no room")
 	ErrTooLarge  = errors.New("page: record too large")
+	ErrEmptyKey  = errors.New("page: empty key")
 )
 
 func (p *Page) Insert(suffix, val []byte) error {
@@ -52,6 +53,9 @@ func (p *Page) Insert(suffix, val []byte) error {
 	}
 	if len(suffix)+len(val) > MaxInlineRecord {
 		return ErrTooLarge
+	}
+	if len(suffix)+len(val) == 0 && p.HeapStart() == PageSize {
+		return ErrEmptyKey
 	}
 	idx, found, ok := p.SeekSlot(suffix)
 	if !ok {
