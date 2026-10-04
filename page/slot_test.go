@@ -282,6 +282,28 @@ func TestSeekSlotRejects(t *testing.T) {
 	}
 }
 
+func TestWithOff(t *testing.T) {
+	t.Run("with off test", func(t *testing.T) {
+		s := makeSlot(8190, 1, 1, false, 0x640000)
+		s = s.withOff(8170)
+		if got := s.off(); got != 8170 {
+			t.Fatalf("withOff() got %d want 8170", got)
+		}
+		if got := s.keyLen(); got != 1 {
+			t.Fatalf("keyLen() got %d want 1", got)
+		}
+		if got := s.head(); got != 0x640000 {
+			t.Fatalf("head() got %#x want 0x640000", got)
+		}
+		if got := s.ovf(); got != false {
+			t.Fatalf("ovf() got %t want false", got)
+		}
+		if got := s.valLen(); got != 1 {
+			t.Fatalf("valLen() got %d want 1", got)
+		}
+	})
+}
+
 var sinkSlot slot
 var sinkHead uint32
 

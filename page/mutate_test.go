@@ -24,7 +24,7 @@ func pageBDF(t *testing.T) *Page {
 	t.Helper()
 	p := newLeaf(t)
 	for _, k := range []string{"b", "d", "f"} {
-		if err := p.Insert([]byte(k), []byte("v")); err != nil {
+		if err := p.Insert([]byte(k), []byte("v"), newTestPage()); err != nil {
 			t.Fatalf("Insert(%q): %v", k, err)
 		}
 	}
@@ -39,7 +39,7 @@ func fillPage(t *testing.T, p *Page) {
 	for i := range count {
 		key := fmt.Appendf(nil, "k%04d", i)
 		val := make([]byte, MaxInlineRecord-len(key))
-		if err := p.Insert(key, val); err != nil {
+		if err := p.Insert(key, val, newTestPage()); err != nil {
 			t.Fatalf("fill insert %d: %v", i, err)
 		}
 	}
@@ -89,7 +89,7 @@ func TestInsertAt(t *testing.T) {
 func TestInsert(t *testing.T) {
 	t.Run("duplicate key", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Insert", p.Insert([]byte("d"), []byte("x")), ErrKeyExists)
+		wantErr(t, "Insert", p.Insert([]byte("d"), []byte("x"), newTestPage()), ErrKeyExists)
 		mustCheck(t, p)
 	})
 
@@ -97,7 +97,7 @@ func TestInsert(t *testing.T) {
 		p := newLeaf(t)
 		fillPage(t, p)
 		key := []byte("z")
-		wantErr(t, "Insert", p.Insert(key, make([]byte, MaxInlineRecord-len(key))), ErrNeedSplit)
+		wantErr(t, "Insert", p.Insert(key, make([]byte, MaxInlineRecord-len(key)), newTestPage()), ErrNeedSplit)
 		mustCheck(t, p)
 	})
 
@@ -106,7 +106,7 @@ func TestInsert(t *testing.T) {
 		fillPage(t, p)
 		key := []byte("z")
 		val := make([]byte, p.freeSpace()-SlotSize-len(key)) // 1047 B on 8 KiB, 303 B on 4 KiB
-		wantErr(t, "Insert", p.Insert(key, val), nil)
+		wantErr(t, "Insert", p.Insert(key, val, newTestPage()), nil)
 		if got := p.freeSpace(); got != 0 {
 			t.Fatalf("freeSpace = %d, want 0", got)
 		}
@@ -115,25 +115,25 @@ func TestInsert(t *testing.T) {
 
 	t.Run("key too long", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Insert", p.Insert(make([]byte, MaxKeyLen+1), []byte("v")), ErrTooLarge)
+		wantErr(t, "Insert", p.Insert(make([]byte, MaxKeyLen+1), []byte("v"), newTestPage()), ErrTooLarge)
 		mustCheck(t, p)
 	})
 
 	t.Run("payload over inline limit", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Insert", p.Insert([]byte("c"), make([]byte, MaxInlineRecord)), ErrTooLarge)
+		wantErr(t, "Insert", p.Insert([]byte("c"), make([]byte, MaxInlineRecord), newTestPage()), ErrTooLarge)
 		mustCheck(t, p)
 	})
 
 	t.Run("empty key on fenceless page", func(t *testing.T) {
 		p := newLeaf(t)
-		wantErr(t, "Insert", p.Insert(nil, nil), ErrEmptyKey)
+		wantErr(t, "Insert", p.Insert(nil, nil, newTestPage()), ErrEmptyKey)
 		mustCheck(t, p)
 	})
 
 	t.Run("empty value is fine", func(t *testing.T) {
 		p := newLeaf(t)
-		wantErr(t, "Insert", p.Insert([]byte("a"), nil), nil)
+		wantErr(t, "Insert", p.Insert([]byte("a"), nil, newTestPage()), nil)
 		mustCheck(t, p)
 	})
 
@@ -142,7 +142,7 @@ func TestInsert(t *testing.T) {
 		if err := p.Format(KindLeaf, []byte("user"), []byte("user:z")); err != nil {
 			t.Fatalf("Format: %v", err)
 		}
-		wantErr(t, "Insert", p.Insert(nil, []byte("v")), nil)
+		wantErr(t, "Insert", p.Insert(nil, []byte("v"), newTestPage()), nil)
 		mustCheck(t, p)
 	})
 }
@@ -152,7 +152,7 @@ func TestInsert(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	t.Run("update existing", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Update", p.Update([]byte("d"), []byte("xyz")), nil)
+		wantErr(t, "Update", p.Update([]byte("d"), []byte("xyz"), newTestPage()), nil)
 		if got := p.SlotCount(); got != 3 {
 			t.Errorf("SlotCount = %d, want 3", got)
 		}
@@ -167,7 +167,7 @@ func TestUpdate(t *testing.T) {
 
 	t.Run("missing key", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Update", p.Update([]byte("c"), []byte("x")), ErrKeyNotFound)
+		wantErr(t, "Update", p.Update([]byte("c"), []byte("x"), newTestPage()), ErrKeyNotFound)
 		if got := p.SlotCount(); got != 3 {
 			t.Errorf("SlotCount = %d, want 3", got)
 		}
@@ -178,7 +178,7 @@ func TestUpdate(t *testing.T) {
 		p := newLeaf(t)
 		fillPage(t, p)
 		key := []byte("k0000")
-		wantErr(t, "Update", p.Update(key, make([]byte, MaxInlineRecord-len(key))), ErrNeedSplit)
+		wantErr(t, "Update", p.Update(key, make([]byte, MaxInlineRecord-len(key)), newTestPage()), ErrNeedSplit)
 		mustCheck(t, p)
 	})
 }
@@ -228,7 +228,7 @@ func TestDelete(t *testing.T) {
 	t.Run("delete then reinsert", func(t *testing.T) {
 		p := pageBDF(t)
 		wantErr(t, "Delete", p.Delete([]byte("d")), nil)
-		wantErr(t, "Insert", p.Insert([]byte("d"), []byte("w")), nil)
+		wantErr(t, "Insert", p.Insert([]byte("d"), []byte("w"), newTestPage()), nil)
 		if got := p.SlotCount(); got != 3 {
 			t.Errorf("SlotCount = %d, want 3", got)
 		}

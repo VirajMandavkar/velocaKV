@@ -93,9 +93,9 @@ func commonPrefixLen(a, b []byte) int {
 }
 
 // Check verifies the page's rules and returns the first one broken.
-// It grows with every unit; it is for tests and debug builds, not hot paths.
+// For tests and debug builds only; never on a hot path.
 func (p *Page) Check() error {
-	// Invariant 6: alignment first, before any atomic load.
+	// Alignment first: atomic loads on a misaligned page are undefined.
 	if uintptr(unsafe.Pointer(p))%8 != 0 {
 		return fmt.Errorf("%w: page address not 8-byte aligned", ErrPageInvariant)
 	}
@@ -107,18 +107,16 @@ func (p *Page) Check() error {
 		return fmt.Errorf("%w: unknown flag bits %#x", ErrPageInvariant, f)
 	}
 
-	// Invariant 1: slots end before the heap begins; heap ends at the page end.
-	slotEnd := slotOff(int(p.SlotCount()))
+	n := int(p.SlotCount())
 	heapStart := int(p.HeapStart())
-	if slotEnd > heapStart || heapStart > PageSize {
+	if slotOff(n) > heapStart || heapStart > PageSize {
 		return fmt.Errorf("%w: slotEnd %d, heapStart %d, PageSize %d",
-			ErrPageInvariant, slotEnd, heapStart, PageSize)
+			ErrPageInvariant, slotOff(n), heapStart, PageSize)
 	}
 	if kind == KindOverflow {
-		return nil // overflow pages have no fences (Unit 8)
+		return nil // no slots or fences (Unit 8)
 	}
 
-	// Fences: inside [heapStart, PageSize), not overlapping, not too long.
 	lo, ln := int(p.LowFenceOff()), int(p.LowFenceLen())
 	ho, hn := int(p.HighFenceOff()), int(p.HighFenceLen())
 	highInf := hn == fenceInf
@@ -138,17 +136,33 @@ func (p *Page) Check() error {
 	if !highInf && bytes.Compare(low, high) >= 0 {
 		return fmt.Errorf("%w: low fence %q >= high fence %q", ErrPageInvariant, low, high)
 	}
-
-	// Invariant 5: prefixLen = common prefix of the fences (0 if high is +inf,
-	// because +inf is stored as zero bytes).
 	if got, want := int(p.PrefixLen()), commonPrefixLen(low, high); got != want {
 		return fmt.Errorf("%w: prefixLen %d, fences share %d", ErrPageInvariant, got, want)
 	}
 
-	sum := p.freeSpace() + int(p.SlotCount())*SlotSize + p.fenceBytes() + p.liveBytes() + int(p.DeadBytes())
-	if Usable != sum {
-		return fmt.Errorf("%w: Expected Usable %d, got  %d", ErrPageInvariant, Usable, sum)
+	// Records: each in bounds and below the fences; keys strictly ascending.
+	fenceStart := PageSize - p.fenceBytes()
+	var prev []byte
+	for i := range n {
+		s := p.slotAt(i)
+		if !recordOK(s, heapStart) {
+			return fmt.Errorf("%w: slot %d out of bounds (off %d, key %d, val %d)",
+				ErrPageInvariant, i, s.off(), s.keyLen(), s.valLen())
+		}
+		if end := s.off() + s.keyLen() + s.valLen(); end > fenceStart {
+			return fmt.Errorf("%w: slot %d ends at %d, inside fences at %d",
+				ErrPageInvariant, i, end, fenceStart)
+		}
+		key := p[s.off() : s.off()+s.keyLen()]
+		if i > 0 && bytes.Compare(prev, key) >= 0 {
+			return fmt.Errorf("%w: slot %d key %q not after %q", ErrPageInvariant, i, key, prev)
+		}
+		prev = key
 	}
 
+	sum := p.freeSpace() + n*SlotSize + p.fenceBytes() + p.liveBytes() + int(p.DeadBytes())
+	if sum != Usable {
+		return fmt.Errorf("%w: accounting sum %d, want Usable %d", ErrPageInvariant, sum, Usable)
+	}
 	return nil
 }

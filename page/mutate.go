@@ -8,6 +8,7 @@ var (
 	ErrTooLarge    = errors.New("page: record too large")
 	ErrEmptyKey    = errors.New("page: empty key")
 	ErrKeyNotFound = errors.New("page: key not found")
+	ErrNoScratch   = errors.New("scratch must be non-nil if the page may need compaction")
 )
 
 func (p *Page) freeSpace() int {
@@ -48,7 +49,8 @@ func (p *Page) insertAt(idx int, suffix, val []byte) {
 	p.SetSlotCount(n + 1)
 }
 
-func (p *Page) Insert(suffix, val []byte) error {
+// scratch must be non-nil if the page may need compaction
+func (p *Page) Insert(suffix, val []byte, scratch *Page) error {
 	if err := p.checkRecord(suffix, val); err != nil {
 		return err
 	}
@@ -62,7 +64,13 @@ func (p *Page) Insert(suffix, val []byte) error {
 
 	need := len(suffix) + len(val) + SlotSize
 	if need > p.freeSpace() {
-		return ErrNeedSplit
+		if need > p.freeSpace()+int(p.DeadBytes()) {
+			return ErrNeedSplit
+		}
+		if scratch == nil {
+			return ErrNoScratch
+		}
+		p.Compact(scratch)
 	}
 	p.insertAt(idx, suffix, val)
 	return nil
@@ -90,7 +98,7 @@ func (p *Page) checkRecord(suffix, val []byte) error {
 	return nil
 }
 
-func (p *Page) Update(suffix, val []byte) error {
+func (p *Page) Update(suffix, val []byte, scratch *Page) error {
 	if err := p.checkRecord(suffix, val); err != nil {
 		return err
 	}
@@ -104,7 +112,13 @@ func (p *Page) Update(suffix, val []byte) error {
 
 	need := len(suffix) + len(val)
 	if need > p.freeSpace() {
-		return ErrNeedSplit
+		if need > p.freeSpace()+int(p.DeadBytes()) {
+			return ErrNeedSplit
+		}
+		if scratch == nil {
+			return ErrNoScratch
+		}
+		p.Compact(scratch)
 	}
 	p.replaceAt(idx, suffix, val)
 	return nil
