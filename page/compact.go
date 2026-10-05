@@ -1,7 +1,7 @@
 package page
 
 func (s slot) withOff(off int) slot {
-	return s&^slot(offsetMask<<offsetShift) | slot(uint64(off)<<offsetShift)
+	return s&^slot(offsetMask<<offsetShift) | slot((uint64(off)&offsetMask)<<offsetShift)
 }
 
 func (p *Page) Compact(scratch *Page) {

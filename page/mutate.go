@@ -67,7 +67,7 @@ func (p *Page) Insert(suffix, val []byte, scratch *Page) error {
 		if need > p.freeSpace()+int(p.DeadBytes()) {
 			return ErrNeedSplit
 		}
-		if scratch == nil {
+		if scratch == nil || scratch == p {
 			return ErrNoScratch
 		}
 		p.Compact(scratch)
@@ -98,6 +98,10 @@ func (p *Page) checkRecord(suffix, val []byte) error {
 	return nil
 }
 
+func (s slot) withValLen(n int) slot {
+	return s&^slot(valLenMask<<valLenShift) | slot((uint64(n)&valLenMask)<<valLenShift)
+}
+
 func (p *Page) Update(suffix, val []byte, scratch *Page) error {
 	if err := p.checkRecord(suffix, val); err != nil {
 		return err
@@ -110,12 +114,22 @@ func (p *Page) Update(suffix, val []byte, scratch *Page) error {
 		return ErrKeyNotFound
 	}
 
+	old := p.slotAt(idx)
+	// TODO(Unit 8): not for OVF records
+	if len(val) <= old.valLen() {
+		copy(p[old.off()+old.keyLen():old.off()+old.keyLen()+old.valLen()], val)
+		deadbytes := int(p.DeadBytes()) + old.valLen() - len(val)
+		p.setSlotAt(idx, old.withValLen(len(val)))
+		p.SetDeadBytes(uint16(deadbytes))
+		return nil
+	}
+
 	need := len(suffix) + len(val)
 	if need > p.freeSpace() {
 		if need > p.freeSpace()+int(p.DeadBytes()) {
 			return ErrNeedSplit
 		}
-		if scratch == nil {
+		if scratch == nil || scratch == p {
 			return ErrNoScratch
 		}
 		p.Compact(scratch)

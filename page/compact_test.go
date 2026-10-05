@@ -6,87 +6,122 @@ import (
 	"testing"
 )
 
+// pageGrowA returns a full page with dead bytes where "a" holds a 10-byte value.
+// Growing "a" to a max-size value cannot go in place and forces compaction.
+// 8 KiB: free 1045, dead 1760 · 4 KiB: free 301, dead 736.
+func pageGrowA(t *testing.T) *Page {
+	t.Helper()
+	p := newLeaf(t)
+	wantErr(t, "Insert", p.Insert([]byte("a"), make([]byte, 10), nil), nil)
+	fillPage(t, p)
+	wantErr(t, "Delete", p.Delete([]byte("k0001")), nil)
+	return p
+}
+
+// pageNeedsCompact returns a full page with one deleted max record:
+// a new max-size insert fits only after compaction.
+func pageNeedsCompact(t *testing.T) *Page {
+	t.Helper()
+	p := newLeaf(t)
+	fillPage(t, p)
+	wantErr(t, "Delete", p.Delete([]byte("k0001")), nil)
+	return p
+}
+
+// maxVal returns a value that makes key+value exactly MaxInlineRecord.
+func maxVal(key []byte) []byte {
+	return bytes.Repeat([]byte("u"), MaxInlineRecord-len(key))
+}
+
+// wantUnchanged fails if free space or dead bytes moved.
+func wantUnchanged(t *testing.T, p *Page, free int, dead uint16) {
+	t.Helper()
+	if p.freeSpace() != free || p.DeadBytes() != dead {
+		t.Errorf("page changed: free %d→%d, dead %d→%d", free, p.freeSpace(), dead, p.DeadBytes())
+	}
+}
+
+// ---------- Compact itself ----------
+
 func TestCompact(t *testing.T) {
-	t.Run("reclaim dead bytes", func(t *testing.T) {
+	t.Run("reclaims dead bytes", func(t *testing.T) {
 		p := pageBDF(t)
 		wantErr(t, "Delete", p.Delete([]byte("d")), nil)
-		initFreeSpace := p.freeSpace()
+		freeBefore := p.freeSpace()
+
 		p.Compact(newTestPage())
-		mustCheck(t, p)
+		mustCheck(t, p) // structure first, then read
+
 		if got := p.DeadBytes(); got != 0 {
-			t.Fatalf("Compact() Deadbytes got %d want 0", got)
+			t.Errorf("DeadBytes = %d, want 0", got)
 		}
-		if got := p.HeapStart(); got != PageSize-4 {
-			t.Fatalf("Compact() HeapStart got %d want %d", got, PageSize-4)
+		if got := int(p.HeapStart()); got != PageSize-4 {
+			t.Errorf("HeapStart = %d, want %d", got, PageSize-4)
 		}
-		if got := p.freeSpace(); got != initFreeSpace+2 {
-			t.Fatalf("COmpact() FreeSpace got %d want %d", got, initFreeSpace+2)
+		if got := p.freeSpace(); got != freeBefore+2 {
+			t.Errorf("freeSpace = %d, want %d", got, freeBefore+2)
 		}
-		if got := string(p.valueAt(0)); got != "v" {
-			t.Fatalf("Compact() ValueAt 0 got %q want v", got)
-		}
-		if got := string(p.valueAt(1)); got != "v" {
-			t.Fatalf("Compact() ValueAt 1 got %q want v", got)
-		}
-		if _, got, _ := p.SeekSlot([]byte("b")); got != true {
-			t.Fatalf("Compact() SeekSlot(b) got %t want true", got)
-		}
-		if _, got, _ := p.SeekSlot([]byte("f")); got != true {
-			t.Fatalf("Compact() SeekSlot(f) got %t want true", got)
+		for _, k := range []string{"b", "f"} {
+			idx, found, ok := p.SeekSlot([]byte(k))
+			if !ok || !found {
+				t.Fatalf("SeekSlot(%q) = (%d, %t, %t), want found", k, idx, found, ok)
+			}
+			if got := string(p.valueAt(idx)); got != "v" {
+				t.Errorf("value of %q = %q, want %q", k, got, "v")
+			}
 		}
 	})
 
 	t.Run("no-op on a clean page", func(t *testing.T) {
 		p := pageBDF(t)
-		initFreeSpace := p.freeSpace()
-		initHeapStart := p.HeapStart()
+		free, heap := p.freeSpace(), p.HeapStart()
+
 		p.Compact(newTestPage())
 		mustCheck(t, p)
-		if got := p.DeadBytes(); got != 0 {
-			t.Fatalf("Compact() Deadbytes got %d want 0", got)
-		}
-		if got := p.HeapStart(); got != initHeapStart {
-			t.Fatalf("Compact() HeapStart got %d want %d", got, initHeapStart)
-		}
-		if got := p.freeSpace(); got != initFreeSpace {
-			t.Fatalf("Compact() FreeSpace got %d want %d", got, initFreeSpace)
+
+		if p.freeSpace() != free || p.HeapStart() != heap || p.DeadBytes() != 0 {
+			t.Errorf("clean page changed: free %d→%d, heapStart %d→%d, dead %d",
+				free, p.freeSpace(), heap, p.HeapStart(), p.DeadBytes())
 		}
 	})
 
-	t.Run("keep gen", func(t *testing.T) {
+	t.Run("keeps gen", func(t *testing.T) {
 		p := pageBDF(t)
 		p.SetGen(7)
 		wantErr(t, "Delete", p.Delete([]byte("d")), nil)
+
 		p.Compact(newTestPage())
 		mustCheck(t, p)
+
 		if got := p.Gen(); got != 7 {
-			t.Fatalf("Compact() Gen got %d want 7", got)
+			t.Errorf("Gen = %d, want 7", got)
 		}
 	})
+
 	t.Run("content preserved", func(t *testing.T) {
 		p := newLeaf(t)
-		want := make(map[string]string)
+		want := make(map[string]string) // reference model
 
-		for i := 0; i < 20; i++ {
+		for i := range 20 {
 			key := fmt.Appendf(nil, "key_%02d", i)
 			val := fmt.Appendf(nil, "val_%02d", i)
-			wantErr(t, "Insert", p.Insert(key, val, newTestPage()), nil)
-			want[string(key)] = string(val) // mirror the insert
+			wantErr(t, "Insert", p.Insert(key, val, nil), nil)
+			want[string(key)] = string(val)
 		}
 		for i := 1; i < 20; i += 2 {
 			key := fmt.Appendf(nil, "key_%02d", i)
 			wantErr(t, "Delete", p.Delete(key), nil)
-			delete(want, string(key)) // mirror the delete
+			delete(want, string(key))
 		}
 
-		p.Compact(newTestPage()) // ← the operation under test
+		p.Compact(newTestPage())
 		mustCheck(t, p)
 
 		if got := int(p.SlotCount()); got != len(want) {
 			t.Fatalf("SlotCount = %d, want %d", got, len(want))
 		}
 		if got := p.DeadBytes(); got != 0 {
-			t.Fatalf("DeadBytes = %d, want 0", got)
+			t.Errorf("DeadBytes = %d, want 0", got)
 		}
 		for k, v := range want {
 			idx, found, ok := p.SeekSlot([]byte(k))
@@ -94,16 +129,24 @@ func TestCompact(t *testing.T) {
 				t.Fatalf("SeekSlot(%q) = (%d, %t, %t), want found", k, idx, found, ok)
 			}
 			if got := string(p.valueAt(idx)); got != v {
-				t.Fatalf("value of %q = %q, want %q", k, got, v)
+				t.Errorf("value of %q = %q, want %q", k, got, v)
 			}
 		}
 	})
+}
+
+// ---------- compact-before-split in Insert ----------
+
+func TestInsertCompaction(t *testing.T) {
 	t.Run("compacts instead of splitting", func(t *testing.T) {
 		p := newLeaf(t)
 		fillPage(t, p)
-		freeAfterFill := p.freeSpace()
-		wantErr(t, "Delete()", p.Delete([]byte("k0001")), nil)
-		wantErr(t, "Insert()", p.Insert([]byte("z"), make([]byte, MaxInlineRecord-1), newTestPage()), nil)
+		freeAfterFill := p.freeSpace() // 1056 on 8 KiB, 312 on 4 KiB
+		wantErr(t, "Delete", p.Delete([]byte("k0001")), nil)
+
+		key := []byte("z")
+		wantErr(t, "Insert", p.Insert(key, maxVal(key), newTestPage()), nil)
+
 		if got := p.DeadBytes(); got != 0 {
 			t.Errorf("DeadBytes = %d, want 0 (compaction should have run)", got)
 		}
@@ -113,64 +156,98 @@ func TestCompact(t *testing.T) {
 		mustCheck(t, p)
 	})
 
-	t.Run("nil scratch when compaction is needed", func(t *testing.T) {
-		p := newLeaf(t)
-		fillPage(t, p)
-		wantErr(t, "Delete", p.Delete([]byte("k0001")), nil)
-		freeBefore, deadBefore := p.freeSpace(), p.DeadBytes()
-
+	t.Run("nil scratch", func(t *testing.T) {
+		p := pageNeedsCompact(t)
+		free, dead := p.freeSpace(), p.DeadBytes()
 		key := []byte("z")
-		val := make([]byte, MaxInlineRecord-len(key))
-		wantErr(t, "Insert", p.Insert(key, val, nil), ErrNoScratch)
-
-		if p.freeSpace() != freeBefore || p.DeadBytes() != deadBefore {
-			t.Errorf("page changed after rejected insert: free %d→%d, dead %d→%d",
-				freeBefore, p.freeSpace(), deadBefore, p.DeadBytes())
-		}
+		wantErr(t, "Insert", p.Insert(key, maxVal(key), nil), ErrNoScratch)
+		wantUnchanged(t, p, free, dead)
 		mustCheck(t, p)
 	})
 
-	t.Run("compacts instead of splitting", func(t *testing.T) {
+	t.Run("page itself as scratch", func(t *testing.T) {
+		p := pageNeedsCompact(t)
+		free, dead := p.freeSpace(), p.DeadBytes()
+		key := []byte("z")
+		wantErr(t, "Insert", p.Insert(key, maxVal(key), p), ErrNoScratch)
+		wantUnchanged(t, p, free, dead)
+		mustCheck(t, p)
+	})
+}
+
+// ---------- in-place and compact-before-split in Update ----------
+
+func TestUpdateCompaction(t *testing.T) {
+	t.Run("same-size update needs no space", func(t *testing.T) {
 		p := newLeaf(t)
-		fillPage(t, p)
-		wantErr(t, "Delete", p.Delete([]byte("k0001")), nil)
-		freeAfterDelete := p.freeSpace() // 1064 on 8 KiB, 320 on 4 KiB
+		fillPage(t, p) // free < one max record, dead = 0
+		free := p.freeSpace()
 
 		key := []byte("k0000")
-		val := bytes.Repeat([]byte("u"), MaxInlineRecord-len(key))
-		wantErr(t, "Update", p.Update(key, val, newTestPage()), nil)
+		wantErr(t, "Update", p.Update(key, maxVal(key), nil), nil) // nil scratch: proves no compaction
 
-		if got := int(p.DeadBytes()); got != MaxInlineRecord {
-			t.Errorf("DeadBytes = %d, want %d (only the old k0000 copy)", got, MaxInlineRecord)
-		}
-		if got := p.freeSpace(); got != freeAfterDelete {
-			t.Errorf("freeSpace = %d, want %d", got, freeAfterDelete)
-		}
-		idx, found, ok := p.SeekSlot(key)
-		if !ok || !found {
-			t.Fatalf("SeekSlot(k0000) = (%d, %t, %t), want found", idx, found, ok)
-		}
-		if !bytes.Equal(p.valueAt(idx), val) {
+		wantUnchanged(t, p, free, 0)
+		idx, _, _ := p.SeekSlot(key)
+		if !bytes.Equal(p.valueAt(idx), maxVal(key)) {
 			t.Errorf("value of k0000 not updated")
 		}
 		mustCheck(t, p)
 	})
 
-	t.Run("nil scratch when compaction is needed", func(t *testing.T) {
+	t.Run("smaller update goes in place", func(t *testing.T) {
 		p := newLeaf(t)
-		fillPage(t, p)
-		wantErr(t, "Delete", p.Delete([]byte("k0001")), nil)
-		freeBefore, deadBefore := p.freeSpace(), p.DeadBytes()
+		wantErr(t, "Insert", p.Insert([]byte("d"), []byte("wxyz"), nil), nil)
+		heap := p.HeapStart()
 
-		key := []byte("k0000")
-		val := make([]byte, MaxInlineRecord-len(key))
-		wantErr(t, "Update", p.Update(key, val, nil), ErrNoScratch)
+		wantErr(t, "Update", p.Update([]byte("d"), []byte("ab"), nil), nil)
 
-		if p.freeSpace() != freeBefore || p.DeadBytes() != deadBefore {
-			t.Errorf("page changed after rejected update: free %d→%d, dead %d→%d",
-				freeBefore, p.freeSpace(), deadBefore, p.DeadBytes())
+		if got := p.HeapStart(); got != heap {
+			t.Errorf("HeapStart = %d, want %d (no new copy)", got, heap)
+		}
+		if got := p.DeadBytes(); got != 2 {
+			t.Errorf("DeadBytes = %d, want 2 (the leftover tail)", got)
+		}
+		if got := string(p.valueAt(0)); got != "ab" {
+			t.Errorf("valueAt(0) = %q, want %q", got, "ab")
 		}
 		mustCheck(t, p)
 	})
 
+	t.Run("growing update compacts instead of splitting", func(t *testing.T) {
+		p := pageGrowA(t)
+		free := p.freeSpace()
+
+		key := []byte("a")
+		wantErr(t, "Update", p.Update(key, maxVal(key), newTestPage()), nil)
+
+		if got := p.DeadBytes(); got != 11 {
+			t.Errorf("DeadBytes = %d, want 11 (only the old \"a\" record)", got)
+		}
+		if got := p.freeSpace(); got != free {
+			t.Errorf("freeSpace = %d, want %d", got, free)
+		}
+		idx, _, _ := p.SeekSlot(key)
+		if !bytes.Equal(p.valueAt(idx), maxVal(key)) {
+			t.Errorf("value of a not updated")
+		}
+		mustCheck(t, p)
+	})
+
+	t.Run("growing update with nil scratch", func(t *testing.T) {
+		p := pageGrowA(t)
+		free, dead := p.freeSpace(), p.DeadBytes()
+		key := []byte("a")
+		wantErr(t, "Update", p.Update(key, maxVal(key), nil), ErrNoScratch)
+		wantUnchanged(t, p, free, dead)
+		mustCheck(t, p)
+	})
+
+	t.Run("growing update with page itself as scratch", func(t *testing.T) {
+		p := pageGrowA(t)
+		free, dead := p.freeSpace(), p.DeadBytes()
+		key := []byte("a")
+		wantErr(t, "Update", p.Update(key, maxVal(key), p), ErrNoScratch)
+		wantUnchanged(t, p, free, dead)
+		mustCheck(t, p)
+	})
 }

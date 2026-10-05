@@ -23,6 +23,7 @@ const (
 // Header words: byte offset where each 8-byte word starts.
 const (
 	word1 = 8  // gen | kind | flags | slotCount
+	word2 = 16 // link | crc
 	word5 = 40 // heapStart | deadBytes | lowFenceOff | lowFenceLen
 	word6 = 48 // highFenceOff | highFenceLen | prefixLen | reserved
 )
@@ -109,4 +110,12 @@ func (p *Page) Init(kind uint8) {
 		atomic.StoreUint64(p.word(off), 0)
 	}
 	p.SetHeapStart(PageSize)
+}
+
+func (p *Page) Link() uint64 {
+	return atomic.LoadUint64(p.word(word2))
+}
+
+func (p *Page) SetLink(v uint64) {
+	atomic.StoreUint64(p.word(word2), v)
 }

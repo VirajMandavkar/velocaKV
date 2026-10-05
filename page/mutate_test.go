@@ -174,11 +174,18 @@ func TestUpdate(t *testing.T) {
 		mustCheck(t, p)
 	})
 
-	t.Run("no room (needs compaction, Unit 7)", func(t *testing.T) {
+	t.Run("same-size update needs no space", func(t *testing.T) {
 		p := newLeaf(t)
 		fillPage(t, p)
+		initFreespce := p.freeSpace()
 		key := []byte("k0000")
-		wantErr(t, "Update", p.Update(key, make([]byte, MaxInlineRecord-len(key)), newTestPage()), ErrNeedSplit)
+		wantErr(t, "Update", p.Update(key, make([]byte, MaxInlineRecord-len(key)), newTestPage()), nil)
+		if p.DeadBytes() != 0 {
+			t.Fatalf("Update() deadbytes got %d , want 0", p.DeadBytes())
+		}
+		if p.freeSpace() != initFreespce {
+			t.Fatalf("Update() freespace got %d , want %d", p.freeSpace(), initFreespce)
+		}
 		mustCheck(t, p)
 	})
 }
