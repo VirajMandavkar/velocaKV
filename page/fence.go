@@ -7,16 +7,19 @@ import (
 	"unsafe"
 )
 
-// ErrPageInvariant means a page broke one of its rules (plan §Invariants).
+// ErrPageInvariant means a page broke one of its structural rules, either
+// because it is corrupt or because a reader saw a torn view of it.
 var ErrPageInvariant = errors.New("page: invariant violated")
 
-// fenceInf in highFenceLen means the high fence is +infinity (no upper bound).
-// A low fence of length 0 means -infinity (no lower bound).
+// fenceInf stored in highFenceLen means the high fence is +infinity (no upper
+// bound). A low fence of length 0 means -infinity (no lower bound).
 const fenceInf = 0xFFFF
 
-// Format turns p into an empty page of the given kind whose keys k satisfy
-// low <= k < high. An empty low means -infinity; an empty high means +infinity.
-// Fences are stored at the top of the heap: high fence last, low fence below it.
+// Format turns p into an empty page of the given kind that owns the keys k
+// with low <= k < high. An empty low means -infinity; an empty high means
+// +infinity. The fences are stored at the top of the heap (high fence last,
+// low fence just below it) and the page prefix is derived from them.
+// A rejected Format leaves the page untouched.
 func (p *Page) Format(kind uint8, low, high []byte) error {
 	if kind != KindLeaf && kind != KindInner {
 		return fmt.Errorf("%w: Format kind %d", ErrPageInvariant, kind)
@@ -31,7 +34,7 @@ func (p *Page) Format(kind uint8, low, high []byte) error {
 	p.Init(kind)
 	top := PageSize
 
-	// High fence: last bytes of the page.
+	// High fence: the last bytes of the page.
 	top -= len(high)
 	copy(p[top:], high)
 	p.SetHighFenceOff(uint16(top))
@@ -53,13 +56,15 @@ func (p *Page) Format(kind uint8, low, high []byte) error {
 	return nil
 }
 
-// LowFence returns the low fence bytes (empty = -infinity). No copy.
+// LowFence returns the low fence bytes (empty = -infinity).
+// The slice points into the page; it is not a copy.
 func (p *Page) LowFence() []byte {
 	off, n := int(p.LowFenceOff()), int(p.LowFenceLen())
 	return p[off : off+n]
 }
 
-// HighFence returns the high fence bytes; inf is true for +infinity. No copy.
+// HighFence returns the high fence bytes; inf is true for +infinity.
+// The slice points into the page; it is not a copy.
 func (p *Page) HighFence() (fence []byte, inf bool) {
 	off, n := int(p.HighFenceOff()), int(p.HighFenceLen())
 	if n == fenceInf {
@@ -68,7 +73,8 @@ func (p *Page) HighFence() (fence []byte, inf bool) {
 	return p[off : off+n], false
 }
 
-// Prefix returns the bytes every key on this page starts with. No copy.
+// Prefix returns the bytes every key on this page starts with.
+// The slice points into the page; it is not a copy.
 func (p *Page) Prefix() []byte {
 	return p.LowFence()[:p.PrefixLen()]
 }
@@ -82,6 +88,7 @@ func (p *Page) fenceBytes() int {
 	return n
 }
 
+// commonPrefixLen returns how many leading bytes a and b share.
 func commonPrefixLen(a, b []byte) int {
 	n := min(len(a), len(b))
 	for i := 0; i < n; i++ {
@@ -92,13 +99,16 @@ func commonPrefixLen(a, b []byte) int {
 	return n
 }
 
-// Check verifies the page's rules and returns the first one broken.
-// For tests and debug builds only; never on a hot path.
+// Check verifies every structural rule of the page and returns the first one
+// broken, wrapped in ErrPageInvariant. It is for tests and debug builds;
+// it reads the whole page, so it never runs on a hot path.
 func (p *Page) Check() error {
 	// Alignment first: atomic loads on a misaligned page are undefined.
 	if uintptr(unsafe.Pointer(p))%8 != 0 {
 		return fmt.Errorf("%w: page address not 8-byte aligned", ErrPageInvariant)
 	}
+
+	// Header: known kind and flags only.
 	kind := p.Kind()
 	if kind > KindOverflow {
 		return fmt.Errorf("%w: unknown kind %d", ErrPageInvariant, kind)
@@ -107,6 +117,7 @@ func (p *Page) Check() error {
 		return fmt.Errorf("%w: unknown flag bits %#x", ErrPageInvariant, f)
 	}
 
+	// Layout: slots end before the heap starts; the heap ends at the page end.
 	n := int(p.SlotCount())
 	heapStart := int(p.HeapStart())
 	if slotOff(n) > heapStart || heapStart > PageSize {
@@ -114,9 +125,10 @@ func (p *Page) Check() error {
 			ErrPageInvariant, slotOff(n), heapStart, PageSize)
 	}
 	if kind == KindOverflow {
-		return nil // no slots or fences (Unit 8)
+		return nil // overflow pages have no slots or fences
 	}
 
+	// Fences: inside the heap, not overlapping, low < high.
 	lo, ln := int(p.LowFenceOff()), int(p.LowFenceLen())
 	ho, hn := int(p.HighFenceOff()), int(p.HighFenceLen())
 	highInf := hn == fenceInf
@@ -136,11 +148,13 @@ func (p *Page) Check() error {
 	if !highInf && bytes.Compare(low, high) >= 0 {
 		return fmt.Errorf("%w: low fence %q >= high fence %q", ErrPageInvariant, low, high)
 	}
+
+	// Prefix: exactly what the fences share.
 	if got, want := int(p.PrefixLen()), commonPrefixLen(low, high); got != want {
 		return fmt.Errorf("%w: prefixLen %d, fences share %d", ErrPageInvariant, got, want)
 	}
 
-	// Records: each in bounds and below the fences; keys strictly ascending.
+	// Records: each readable, below the fences, keys strictly ascending.
 	fenceStart := PageSize - p.fenceBytes()
 	var prev []byte
 	for i := range n {
@@ -160,6 +174,7 @@ func (p *Page) Check() error {
 		prev = key
 	}
 
+	// Accounting: every body byte is in exactly one bucket.
 	sum := p.freeSpace() + n*SlotSize + p.fenceBytes() + p.liveBytes() + int(p.DeadBytes())
 	if sum != Usable {
 		return fmt.Errorf("%w: accounting sum %d, want Usable %d", ErrPageInvariant, sum, Usable)

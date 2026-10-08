@@ -44,8 +44,8 @@ func typecheck(t *testing.T, pageBits int, oldText, newText string) error {
 }
 
 func TestGeometryAsserts(t *testing.T) {
-	const fence = "MaxFenceBytes   = 2 * MaxKeyLen"
-	const bigFence = "MaxFenceBytes   = 2048"
+	const fence = "MaxFenceBytes = 2 * MaxKeyLen"
+	const bigFence = "MaxFenceBytes = 2048"
 	cases := []struct {
 		name      string
 		pageBits  int

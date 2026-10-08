@@ -5,13 +5,23 @@ import (
 	"sync/atomic"
 )
 
-// slot is one 8-byte directory entry:
+// slot is one 8-byte slot directory entry describing one record:
 //
 //	bit 63        51 50       38 37       26   25  24  23       0
 //	    | offset 13 | keyLen 13 | valLen 12 | OVF | RSV | head 24 |
+//
+//	offset  where the record starts in the page
+//	keyLen  length of the key suffix
+//	valLen  length of the value, or ovfStubSize when OVF is set
+//	OVF     the value lives in an overflow chain; the record holds a stub
+//	RSV     reserved, always 0
+//	head    first 3 bytes of the key suffix, big-endian, zero-padded
+//
+// Slots are kept sorted by key. Because the head sits in the slot itself, a
+// binary search can decide most comparisons without touching the record.
 type slot uint64
 
-// Bit positions, derived from the field widths (low field first).
+// Bit positions, derived from the field widths (lowest field first).
 const (
 	headBits    = 24
 	rsvShift    = headBits                     // 24
@@ -32,8 +42,10 @@ const (
 	_ = uint((offsetShift + slotOffsetBits) - 64)
 )
 
-// makeSlot packs one slot. Each input is masked to its field width,
-// so a bad value can never spill into a neighbouring field.
+// makeSlot packs one slot. Each input is masked to its field width, so an
+// oversized value can never spill into a neighbouring field. Masking also
+// means makeSlot never rejects anything: callers must enforce the real
+// limits (MaxKeyLen, MaxInlineRecord) before encoding.
 func makeSlot(off, keyLen, valLen int, ovf bool, head uint32) slot {
 	s := uint64(off&offsetMask)<<offsetShift |
 		uint64(keyLen&keyLenMask)<<keyLenShift |
@@ -51,7 +63,32 @@ func (s slot) valLen() int  { return int(s>>valLenShift) & valLenMask }
 func (s slot) ovf() bool    { return s>>ovfShift&1 == 1 }
 func (s slot) head() uint32 { return uint32(s) & headMask }
 
+// The with* helpers return a copy of s with one field replaced.
+// A slot is a plain value: they never change the page. Store the result
+// with setSlotAt.
+
+// withOff replaces the record offset (Compact moves records).
+func (s slot) withOff(off int) slot {
+	return s&^slot(offsetMask<<offsetShift) | slot((uint64(off)&offsetMask)<<offsetShift)
+}
+
+// withValLen replaces the value length (in-place updates).
+func (s slot) withValLen(n int) slot {
+	return s&^slot(valLenMask<<valLenShift) | slot((uint64(n)&valLenMask)<<valLenShift)
+}
+
+// withOvf sets or clears the overflow flag.
+func (s slot) withOvf(on bool) slot {
+	s &^= 1 << ovfShift
+	if on {
+		s |= 1 << ovfShift
+	}
+	return s
+}
+
 // keyHead packs the first 3 bytes of a key suffix, big-endian, zero-padded.
+// Comparing two heads as integers orders keys exactly like bytes.Compare,
+// except that it may report a tie; only then are the full keys compared.
 func keyHead(suffix []byte) uint32 {
 	switch len(suffix) {
 	case 0:
@@ -73,17 +110,22 @@ func (p *Page) slotAt(i int) slot {
 	return slot(atomic.LoadUint64(p.word(slotOff(i))))
 }
 
-// setSlotAt writes slot i with one atomic store. Caller holds the write lock.
+// setSlotAt writes slot i with one atomic store. The caller holds the write lock.
 func (p *Page) setSlotAt(i int, s slot) {
 	atomic.StoreUint64(p.word(slotOff(i)), uint64(s))
 }
 
+// recordOK reports whether the record s describes can be read safely, given
+// the heapStart from the same snapshot of the page. A lock-free reader may
+// combine words written at different moments (a torn view); this check turns
+// such a view into a retry instead of an out-of-bounds read.
 func recordOK(s slot, heapStart int) bool {
 	end := s.off() + s.keyLen() + s.valLen()
-	badOvf := s.ovf() && s.valLen() != ovfStubSize
+	badOvf := s.ovf() && s.valLen() != ovfStubSize // a real overflow slot always holds an 8-byte stub
 	return s.off() >= heapStart && end <= PageSize && s.keyLen() <= MaxKeyLen && !badOvf
 }
 
+// cmpHead compares two key heads: -1, 0 or +1.
 func cmpHead(a, b uint32) int {
 	if a < b {
 		return -1
@@ -94,41 +136,48 @@ func cmpHead(a, b uint32) int {
 	return 0
 }
 
+// cmpSlot compares a search suffix (with its precomputed head) against the
+// key of slot s: negative if the search key sorts first. It reads the record
+// only when the heads tie. The caller has already checked recordOK(s).
 func (p *Page) cmpSlot(s slot, suffix []byte, head uint32) int {
-	c := cmpHead(head, s.head())
-	if c == 0 {
-		return bytes.Compare(suffix, p[s.off():s.off()+s.keyLen()])
+	if c := cmpHead(head, s.head()); c != 0 {
+		return c
 	}
-	return c
+	return bytes.Compare(suffix, p[s.off():s.off()+s.keyLen()])
 }
 
+// SeekSlot finds suffix with a binary search over the slot directory.
+//
+//	found = true:  slot idx holds exactly this key.
+//	found = false: idx is where the key would be inserted (0..SlotCount).
+//	ok = false:    the page view is inconsistent; ignore idx and found and retry.
+//
+// SlotCount and HeapStart are read once, so the whole search works on one
+// snapshot of the page.
 func (p *Page) SeekSlot(suffix []byte) (idx int, found, ok bool) {
-	// if string(suffix) == "" {
-	// 	return 0, false, false
-	// }
 	head := keyHead(suffix)
-	lo := 0
 	n := int(p.SlotCount())
 	heapStart := int(p.HeapStart())
 	if slotOff(n) > heapStart {
-		return 0, false, false
+		return 0, false, false // slot directory runs into the heap: torn count
 	}
-	hi := n
+
+	lo, hi := 0, n // invariant: keys left of lo are < suffix; keys at or right of hi are >= suffix
 	for lo < hi {
 		mid := lo + (hi-lo)/2
 		s := p.slotAt(mid)
 		if !recordOK(s, heapStart) {
 			return 0, false, false
 		}
-		c := p.cmpSlot(s, suffix, head)
-		if c > 0 {
+		if p.cmpSlot(s, suffix, head) > 0 {
 			lo = mid + 1
 		} else {
 			hi = mid
 		}
 	}
+
 	idx = lo
-	if idx < n {
+	if idx < n { // slot n does not exist: never load it
 		s := p.slotAt(idx)
 		if !recordOK(s, heapStart) {
 			return 0, false, false

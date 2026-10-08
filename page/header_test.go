@@ -6,12 +6,6 @@ import (
 	"unsafe"
 )
 
-// newTestPage returns a zeroed page that is 8-byte aligned by guarantee
-// (the first word of an allocated []uint64 array is 64-bit aligned).
-func newTestPage() *Page {
-	return (*Page)(unsafe.Pointer(new([PageSize / 8]uint64)))
-}
-
 // field describes one header field: where the plan puts it and how to reach it.
 type field struct {
 	name string
@@ -95,7 +89,7 @@ func TestHeaderExactBytes(t *testing.T) {
 	}
 }
 
-// Test 4: a fresh page has the values from design question 2.
+// Test 4: Init resets every field except gen, and never touches the version word.
 func TestHeaderInitEmptyLeaf(t *testing.T) {
 	p := newTestPage()
 	p[0] = 0x55 // pretend the version word holds something
@@ -133,7 +127,7 @@ func BenchmarkSlotCount(b *testing.B) {
 	p := newTestPage()
 	p.SetSlotCount(300)
 	var sink uint16
-	for i := 0; b.Loop(); i++ {
+	for b.Loop() {
 		sink += p.SlotCount()
 	}
 	_ = sink

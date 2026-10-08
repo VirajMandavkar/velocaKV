@@ -14,7 +14,7 @@ func pageGrowA(t *testing.T) *Page {
 	p := newLeaf(t)
 	wantErr(t, "Insert", p.Insert([]byte("a"), make([]byte, 10), nil), nil)
 	fillPage(t, p)
-	wantErr(t, "Delete", p.Delete([]byte("k0001")), nil)
+	wantErr(t, "Delete", p.Delete([]byte("k0001"), testEnv()), nil)
 	return p
 }
 
@@ -24,7 +24,7 @@ func pageNeedsCompact(t *testing.T) *Page {
 	t.Helper()
 	p := newLeaf(t)
 	fillPage(t, p)
-	wantErr(t, "Delete", p.Delete([]byte("k0001")), nil)
+	wantErr(t, "Delete", p.Delete([]byte("k0001"), testEnv()), nil)
 	return p
 }
 
@@ -46,7 +46,7 @@ func wantUnchanged(t *testing.T, p *Page, free int, dead uint16) {
 func TestCompact(t *testing.T) {
 	t.Run("reclaims dead bytes", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Delete", p.Delete([]byte("d")), nil)
+		wantErr(t, "Delete", p.Delete([]byte("d"), testEnv()), nil)
 		freeBefore := p.freeSpace()
 
 		p.Compact(newTestPage())
@@ -88,7 +88,7 @@ func TestCompact(t *testing.T) {
 	t.Run("keeps gen", func(t *testing.T) {
 		p := pageBDF(t)
 		p.SetGen(7)
-		wantErr(t, "Delete", p.Delete([]byte("d")), nil)
+		wantErr(t, "Delete", p.Delete([]byte("d"), testEnv()), nil)
 
 		p.Compact(newTestPage())
 		mustCheck(t, p)
@@ -110,7 +110,7 @@ func TestCompact(t *testing.T) {
 		}
 		for i := 1; i < 20; i += 2 {
 			key := fmt.Appendf(nil, "key_%02d", i)
-			wantErr(t, "Delete", p.Delete(key), nil)
+			wantErr(t, "Delete", p.Delete(key, testEnv()), nil)
 			delete(want, string(key))
 		}
 
@@ -142,10 +142,10 @@ func TestInsertCompaction(t *testing.T) {
 		p := newLeaf(t)
 		fillPage(t, p)
 		freeAfterFill := p.freeSpace() // 1056 on 8 KiB, 312 on 4 KiB
-		wantErr(t, "Delete", p.Delete([]byte("k0001")), nil)
+		wantErr(t, "Delete", p.Delete([]byte("k0001"), testEnv()), nil)
 
 		key := []byte("z")
-		wantErr(t, "Insert", p.Insert(key, maxVal(key), newTestPage()), nil)
+		wantErr(t, "Insert", p.Insert(key, maxVal(key), testEnv()), nil)
 
 		if got := p.DeadBytes(); got != 0 {
 			t.Errorf("DeadBytes = %d, want 0 (compaction should have run)", got)
@@ -169,7 +169,7 @@ func TestInsertCompaction(t *testing.T) {
 		p := pageNeedsCompact(t)
 		free, dead := p.freeSpace(), p.DeadBytes()
 		key := []byte("z")
-		wantErr(t, "Insert", p.Insert(key, maxVal(key), p), ErrNoScratch)
+		wantErr(t, "Insert", p.Insert(key, maxVal(key), &Env{Scratch: p}), ErrNoScratch)
 		wantUnchanged(t, p, free, dead)
 		mustCheck(t, p)
 	})
@@ -218,7 +218,7 @@ func TestUpdateCompaction(t *testing.T) {
 		free := p.freeSpace()
 
 		key := []byte("a")
-		wantErr(t, "Update", p.Update(key, maxVal(key), newTestPage()), nil)
+		wantErr(t, "Update", p.Update(key, maxVal(key), testEnv()), nil)
 
 		if got := p.DeadBytes(); got != 11 {
 			t.Errorf("DeadBytes = %d, want 11 (only the old \"a\" record)", got)
@@ -246,7 +246,7 @@ func TestUpdateCompaction(t *testing.T) {
 		p := pageGrowA(t)
 		free, dead := p.freeSpace(), p.DeadBytes()
 		key := []byte("a")
-		wantErr(t, "Update", p.Update(key, maxVal(key), p), ErrNoScratch)
+		wantErr(t, "Update", p.Update(key, maxVal(key), &Env{Scratch: p}), ErrNoScratch)
 		wantUnchanged(t, p, free, dead)
 		mustCheck(t, p)
 	})

@@ -147,7 +147,7 @@ func TestRecordOK(t *testing.T) {
 		{"key one past max", PageSize - MaxKeyLen - 1, MaxKeyLen + 1, 0, false, PageSize - MaxKeyLen - 1, false},
 		{"zero length record", PageSize - 105, 0, 0, false, PageSize - 105, true},
 		{"overflow stub, correct size", PageSize - 13, 5, ovfStubSize, true, PageSize - 13, true},
-		{"overflow. wrong valLen", PageSize - 105, 5, 100, true, PageSize - 105, false},
+		{"overflow, wrong valLen", PageSize - 105, 5, 100, true, PageSize - 105, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -188,19 +188,20 @@ func TestCmpSlot(t *testing.T) {
 
 func TestLowerBound(t *testing.T) {
 	tests := []struct {
+		name   string
 		search string
 		keys   []string
 		idx    int
 		found  bool
 	}{
-		{"d", []string{"b", "d", "f"}, 1, true},
-		{"e", []string{"b", "d", "f"}, 2, false},
-		{"a", []string{"b", "d", "f"}, 0, false},
-		{"z", []string{"b", "d", "f"}, 3, false},
-		{"a", []string{}, 0, false},
+		{"hit", "d", []string{"b", "d", "f"}, 1, true},
+		{"miss between", "e", []string{"b", "d", "f"}, 2, false},
+		{"before all", "a", []string{"b", "d", "f"}, 0, false},
+		{"after all", "z", []string{"b", "d", "f"}, 3, false},
+		{"empty slice", "a", []string{}, 0, false},
 	}
 	for _, tt := range tests {
-		t.Run(tt.search, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			idx, found := lowerBound(tt.keys, tt.search)
 			if idx != tt.idx || found != tt.found {
 				t.Errorf("lowerBound(%q) = (%d, %v), want (%d, %v)",
@@ -208,26 +209,6 @@ func TestLowerBound(t *testing.T) {
 			}
 		})
 	}
-}
-
-func pageWithKeys(t *testing.T, keys []string) *Page {
-	t.Helper()
-	p := newTestPage()
-	if err := p.Format(KindLeaf, nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	top := int(p.HeapStart())
-	for i, key := range keys {
-		top -= len(key)
-		copy(p[top:], key)
-		p.setSlotAt(i, makeSlot(top, len(key), 0, false, keyHead([]byte(key))))
-	}
-	p.SetHeapStart(uint16(top))
-	p.SetSlotCount(uint16(len(keys)))
-	if err := p.Check(); err != nil {
-		t.Fatal(err)
-	}
-	return p
 }
 
 func TestSeekSlot(t *testing.T) {
@@ -242,7 +223,7 @@ func TestSeekSlot(t *testing.T) {
 		{"miss between", []string{"b", "d", "f"}, "e", 2, false},
 		{"before all", []string{"b", "d", "f"}, "a", 0, false},
 		{"after all", []string{"b", "d", "f"}, "z", 3, false},
-		{"empty page (none)", []string{}, "a", 0, false},
+		{"empty page", []string{}, "a", 0, false},
 		{"head tie, shorter key", []string{"apple", "apricot", "apron"}, "apr", 1, false},
 		{"head tie, hit", []string{"apple", "apricot", "apron"}, "apricot", 1, true},
 		{"head tie, past all", []string{"apple", "apricot", "apron"}, "aprz", 3, false},
@@ -282,26 +263,25 @@ func TestSeekSlotRejects(t *testing.T) {
 	}
 }
 
-func TestWithOff(t *testing.T) {
-	t.Run("with off test", func(t *testing.T) {
-		s := makeSlot(8190, 1, 1, false, 0x640000)
-		s = s.withOff(8170)
-		if got := s.off(); got != 8170 {
-			t.Fatalf("withOff() got %d want 8170", got)
+// TestSlotWith checks that each with* helper changes exactly one field.
+func TestSlotWith(t *testing.T) {
+	base := makeSlot(100, 5, 40, false, 0x640000)
+	cases := []struct {
+		name string
+		got  slot
+		want slot
+	}{
+		{"withOff", base.withOff(200), makeSlot(200, 5, 40, false, 0x640000)},
+		{"withValLen", base.withValLen(8), makeSlot(100, 5, 8, false, 0x640000)},
+		{"withOvf on", base.withOvf(true), makeSlot(100, 5, 40, true, 0x640000)},
+		{"withOvf off", base.withOvf(true).withOvf(false), base},
+		{"withValLen masks", base.withValLen(valLenMask + 1), makeSlot(100, 5, 0, false, 0x640000)},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s: got %#016x, want %#016x", c.name, uint64(c.got), uint64(c.want))
 		}
-		if got := s.keyLen(); got != 1 {
-			t.Fatalf("keyLen() got %d want 1", got)
-		}
-		if got := s.head(); got != 0x640000 {
-			t.Fatalf("head() got %#x want 0x640000", got)
-		}
-		if got := s.ovf(); got != false {
-			t.Fatalf("ovf() got %t want false", got)
-		}
-		if got := s.valLen(); got != 1 {
-			t.Fatalf("valLen() got %d want 1", got)
-		}
-	})
+	}
 }
 
 var sinkSlot slot
@@ -326,20 +306,4 @@ func BenchmarkMakeSlot(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		sinkSlot = makeSlot(i&offsetMask, 5, 100, false, 0x617070)
 	}
-}
-
-func lowerBound(keys []string, k string) (idx int, found bool) {
-	lo := 0
-	hi := len(keys)
-	for lo < hi {
-		mid := lo + (hi-lo)/2
-		if keys[mid] < k {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	idx = lo
-	found = idx < len(keys) && keys[idx] == k
-	return idx, found
 }

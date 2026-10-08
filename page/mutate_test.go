@@ -1,71 +1,14 @@
 package page
 
 import (
-	"errors"
-	"fmt"
+	"bytes"
 	"testing"
 )
 
-// ---------- helpers ----------
-
-// newLeaf returns a fresh, fenceless leaf page.
-func newLeaf(t *testing.T) *Page {
-	t.Helper()
-	p := newTestPage()
-	if err := p.Format(KindLeaf, nil, nil); err != nil {
-		t.Fatalf("Format: %v", err)
-	}
-	return p
-}
-
-// pageBDF returns a leaf holding "b", "d", "f", each with value "v".
-// Heap layout (8 KiB): b@8190, d@8188, f@8186; heapStart = 8186.
-func pageBDF(t *testing.T) *Page {
-	t.Helper()
-	p := newLeaf(t)
-	for _, k := range []string{"b", "d", "f"} {
-		if err := p.Insert([]byte(k), []byte("v"), newTestPage()); err != nil {
-			t.Fatalf("Insert(%q): %v", k, err)
-		}
-	}
-	return p
-}
-
-// fillPage inserts max-size records until one more cannot fit.
-// Leaves 1056 B free on 8 KiB (4 records), 312 B on 4 KiB (5 records).
-func fillPage(t *testing.T, p *Page) {
-	t.Helper()
-	count := Usable / (MaxInlineRecord + SlotSize)
-	for i := range count {
-		key := fmt.Appendf(nil, "k%04d", i)
-		val := make([]byte, MaxInlineRecord-len(key))
-		if err := p.Insert(key, val, newTestPage()); err != nil {
-			t.Fatalf("fill insert %d: %v", i, err)
-		}
-	}
-}
-
-// mustCheck fails the test if any page invariant is broken.
-func mustCheck(t *testing.T, p *Page) {
-	t.Helper()
-	if err := p.Check(); err != nil {
-		t.Fatalf("Check: %v", err)
-	}
-}
-
-// wantErr fails the test unless err matches want (nil means success).
-func wantErr(t *testing.T, op string, err, want error) {
-	t.Helper()
-	if want == nil && err != nil {
-		t.Fatalf("%s: error = %v, want nil", op, err)
-	}
-	if want != nil && !errors.Is(err, want) {
-		t.Fatalf("%s: error = %v, want %v", op, err, want)
-	}
-}
-
 // ---------- insertAt ----------
 
+// TestInsertAt inserts keys out of order and checks that the slots end up
+// sorted, with every intermediate page passing Check.
 func TestInsertAt(t *testing.T) {
 	p := newLeaf(t)
 	for _, key := range []string{"d", "b", "f", "c"} {
@@ -73,7 +16,7 @@ func TestInsertAt(t *testing.T) {
 		if found || !ok {
 			t.Fatalf("SeekSlot(%q) = (%d, %t, %t), want not found, ok", key, idx, found, ok)
 		}
-		p.insertAt(idx, []byte(key), []byte("v"))
+		p.insertAt(idx, []byte(key), []byte("v"), false)
 		mustCheck(t, p)
 	}
 	for want, key := range []string{"b", "c", "d", "f"} {
@@ -89,7 +32,7 @@ func TestInsertAt(t *testing.T) {
 func TestInsert(t *testing.T) {
 	t.Run("duplicate key", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Insert", p.Insert([]byte("d"), []byte("x"), newTestPage()), ErrKeyExists)
+		wantErr(t, "Insert", p.Insert([]byte("d"), []byte("x"), testEnv()), ErrKeyExists)
 		mustCheck(t, p)
 	})
 
@@ -97,7 +40,7 @@ func TestInsert(t *testing.T) {
 		p := newLeaf(t)
 		fillPage(t, p)
 		key := []byte("z")
-		wantErr(t, "Insert", p.Insert(key, make([]byte, MaxInlineRecord-len(key)), newTestPage()), ErrNeedSplit)
+		wantErr(t, "Insert", p.Insert(key, make([]byte, MaxInlineRecord-len(key)), testEnv()), ErrNeedSplit)
 		mustCheck(t, p)
 	})
 
@@ -106,7 +49,7 @@ func TestInsert(t *testing.T) {
 		fillPage(t, p)
 		key := []byte("z")
 		val := make([]byte, p.freeSpace()-SlotSize-len(key)) // 1047 B on 8 KiB, 303 B on 4 KiB
-		wantErr(t, "Insert", p.Insert(key, val, newTestPage()), nil)
+		wantErr(t, "Insert", p.Insert(key, val, testEnv()), nil)
 		if got := p.freeSpace(); got != 0 {
 			t.Fatalf("freeSpace = %d, want 0", got)
 		}
@@ -115,25 +58,29 @@ func TestInsert(t *testing.T) {
 
 	t.Run("key too long", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Insert", p.Insert(make([]byte, MaxKeyLen+1), []byte("v"), newTestPage()), ErrTooLarge)
+		wantErr(t, "Insert", p.Insert(make([]byte, MaxKeyLen+1), []byte("v"), testEnv()), ErrTooLarge)
 		mustCheck(t, p)
 	})
 
-	t.Run("payload over inline limit", func(t *testing.T) {
+	t.Run("payload over inline limit goes to overflow", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Insert", p.Insert([]byte("c"), make([]byte, MaxInlineRecord), newTestPage()), ErrTooLarge)
+		wantErr(t, "Insert", p.Insert([]byte("c"), make([]byte, MaxInlineRecord), testEnv()), nil)
+		idx, _, _ := p.SeekSlot([]byte("c"))
+		if !p.slotAt(idx).ovf() {
+			t.Errorf("slot OVF = false, want true")
+		}
 		mustCheck(t, p)
 	})
 
 	t.Run("empty key on fenceless page", func(t *testing.T) {
 		p := newLeaf(t)
-		wantErr(t, "Insert", p.Insert(nil, nil, newTestPage()), ErrEmptyKey)
+		wantErr(t, "Insert", p.Insert(nil, nil, testEnv()), ErrEmptyKey)
 		mustCheck(t, p)
 	})
 
 	t.Run("empty value is fine", func(t *testing.T) {
 		p := newLeaf(t)
-		wantErr(t, "Insert", p.Insert([]byte("a"), nil, newTestPage()), nil)
+		wantErr(t, "Insert", p.Insert([]byte("a"), nil, testEnv()), nil)
 		mustCheck(t, p)
 	})
 
@@ -142,7 +89,79 @@ func TestInsert(t *testing.T) {
 		if err := p.Format(KindLeaf, []byte("user"), []byte("user:z")); err != nil {
 			t.Fatalf("Format: %v", err)
 		}
-		wantErr(t, "Insert", p.Insert(nil, []byte("v"), newTestPage()), nil)
+		wantErr(t, "Insert", p.Insert(nil, []byte("v"), testEnv()), nil)
+		mustCheck(t, p)
+	})
+}
+
+func TestInsertOverflow(t *testing.T) {
+	value := make([]byte, 20_000)
+	for i := range value {
+		value[i] = byte(i % 251)
+	}
+
+	t.Run("big value goes to a chain", func(t *testing.T) {
+		p := newLeaf(t)
+		pages := newMemPages()
+		env := &Env{Scratch: newTestPage(), Pages: pages}
+		wantErr(t, "Insert", p.Insert([]byte("a"), value, env), nil)
+
+		if got := p.SlotCount(); got != 1 {
+			t.Fatalf("SlotCount = %d, want 1", got)
+		}
+		if got := p.Flags() & FlagHasOverflow; got == 0 {
+			t.Errorf("page flags = %#x, want FlagHasOverflow", p.Flags())
+		}
+		if !p.slotAt(0).ovf() {
+			t.Errorf("slot 0 OVF = false, want true")
+		}
+		stubBytes := p.valueAt(0)
+		if len(stubBytes) != 8 {
+			t.Fatalf("overflow slot value length = %d, want 8", len(stubBytes))
+		}
+		id, totalLen := readStub(stubBytes)
+
+		if int(totalLen) != len(value) {
+			t.Errorf("stub totalLen = %d, want %d", totalLen, len(value))
+		}
+		got, ok := readChain(pages, id, totalLen, nil)
+		if !ok {
+			t.Fatal("readChain: false")
+		}
+		if !bytes.Equal(got, value) {
+			t.Errorf("readChain returned a different value")
+		}
+		if got := pages.live(); got != overflowPages(len(value)) {
+			t.Errorf("live pages = %d, want %d", got, overflowPages(len(value)))
+		}
+		mustCheck(t, p)
+	})
+
+	t.Run("no page source", func(t *testing.T) {
+		p := newLeaf(t)
+		before := p.SlotCount()
+		wantErr(t, "Insert", p.Insert([]byte("a"), value, &Env{Scratch: newTestPage()}), ErrNoPages)
+		if got := p.SlotCount(); got != before {
+			t.Errorf("SlotCount = %d, want unchanged at %d", got, before)
+		}
+		mustCheck(t, p)
+	})
+
+	t.Run("allocation fails midway", func(t *testing.T) {
+		p := newLeaf(t)
+		pages := newMemPages()
+		pages.failAfter = 1
+		before := p.SlotCount()
+		err := p.Insert([]byte("a"), value, &Env{Scratch: newTestPage(), Pages: pages})
+		if err == nil {
+			t.Fatal("Insert succeeded, want allocation error")
+		}
+		if got := p.SlotCount(); got != before {
+			t.Errorf("SlotCount = %d, want unchanged at %d", got, before)
+		}
+		if got := pages.live(); got != 0 {
+			t.Errorf("live pages = %d, want 0 (no leak)", got)
+		}
 		mustCheck(t, p)
 	})
 }
@@ -152,7 +171,7 @@ func TestInsert(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	t.Run("update existing", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Update", p.Update([]byte("d"), []byte("xyz"), newTestPage()), nil)
+		wantErr(t, "Update", p.Update([]byte("d"), []byte("xyz"), testEnv()), nil)
 		if got := p.SlotCount(); got != 3 {
 			t.Errorf("SlotCount = %d, want 3", got)
 		}
@@ -167,7 +186,7 @@ func TestUpdate(t *testing.T) {
 
 	t.Run("missing key", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Update", p.Update([]byte("c"), []byte("x"), newTestPage()), ErrKeyNotFound)
+		wantErr(t, "Update", p.Update([]byte("c"), []byte("x"), testEnv()), ErrKeyNotFound)
 		if got := p.SlotCount(); got != 3 {
 			t.Errorf("SlotCount = %d, want 3", got)
 		}
@@ -177,14 +196,14 @@ func TestUpdate(t *testing.T) {
 	t.Run("same-size update needs no space", func(t *testing.T) {
 		p := newLeaf(t)
 		fillPage(t, p)
-		initFreespce := p.freeSpace()
+		freeBefore := p.freeSpace()
 		key := []byte("k0000")
-		wantErr(t, "Update", p.Update(key, make([]byte, MaxInlineRecord-len(key)), newTestPage()), nil)
+		wantErr(t, "Update", p.Update(key, make([]byte, MaxInlineRecord-len(key)), testEnv()), nil)
 		if p.DeadBytes() != 0 {
-			t.Fatalf("Update() deadbytes got %d , want 0", p.DeadBytes())
+			t.Fatalf("DeadBytes = %d, want 0", p.DeadBytes())
 		}
-		if p.freeSpace() != initFreespce {
-			t.Fatalf("Update() freespace got %d , want %d", p.freeSpace(), initFreespce)
+		if p.freeSpace() != freeBefore {
+			t.Fatalf("freeSpace = %d, want %d", p.freeSpace(), freeBefore)
 		}
 		mustCheck(t, p)
 	})
@@ -195,7 +214,7 @@ func TestUpdate(t *testing.T) {
 func TestDelete(t *testing.T) {
 	t.Run("delete middle", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Delete", p.Delete([]byte("d")), nil)
+		wantErr(t, "Delete", p.Delete([]byte("d"), testEnv()), nil)
 		if got := p.SlotCount(); got != 2 {
 			t.Errorf("SlotCount = %d, want 2", got)
 		}
@@ -213,7 +232,7 @@ func TestDelete(t *testing.T) {
 
 	t.Run("delete last", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Delete", p.Delete([]byte("f")), nil)
+		wantErr(t, "Delete", p.Delete([]byte("f"), testEnv()), nil)
 		if got := p.SlotCount(); got != 2 {
 			t.Errorf("SlotCount = %d, want 2", got)
 		}
@@ -225,7 +244,7 @@ func TestDelete(t *testing.T) {
 
 	t.Run("missing key", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Delete", p.Delete([]byte("c")), ErrKeyNotFound)
+		wantErr(t, "Delete", p.Delete([]byte("c"), testEnv()), ErrKeyNotFound)
 		if got := p.SlotCount(); got != 3 {
 			t.Errorf("SlotCount = %d, want 3", got)
 		}
@@ -234,8 +253,8 @@ func TestDelete(t *testing.T) {
 
 	t.Run("delete then reinsert", func(t *testing.T) {
 		p := pageBDF(t)
-		wantErr(t, "Delete", p.Delete([]byte("d")), nil)
-		wantErr(t, "Insert", p.Insert([]byte("d"), []byte("w"), newTestPage()), nil)
+		wantErr(t, "Delete", p.Delete([]byte("d"), testEnv()), nil)
+		wantErr(t, "Insert", p.Insert([]byte("d"), []byte("w"), testEnv()), nil)
 		if got := p.SlotCount(); got != 3 {
 			t.Errorf("SlotCount = %d, want 3", got)
 		}
@@ -247,4 +266,101 @@ func TestDelete(t *testing.T) {
 		}
 		mustCheck(t, p)
 	})
+}
+
+func TestDeleteOverflow(t *testing.T) {
+	value := make([]byte, 20_000)
+
+	t.Run("frees the chain", func(t *testing.T) {
+		p := newLeaf(t)
+		src := newMemPages()
+		env := &Env{Scratch: newTestPage(), Pages: src}
+		wantErr(t, "Insert", p.Insert([]byte("a"), value, env), nil)
+
+		wantErr(t, "Delete", p.Delete([]byte("a"), env), nil)
+		if got := p.SlotCount(); got != 0 {
+			t.Errorf("SlotCount = %d, want 0", got)
+		}
+		if got := src.live(); got != 0 {
+			t.Errorf("src.live() = %d, want 0", got)
+		}
+		mustCheck(t, p)
+	})
+
+	t.Run("no page source", func(t *testing.T) {
+		p := newLeaf(t)
+		src := newMemPages()
+		insertEnv := &Env{Scratch: newTestPage(), Pages: src}
+		wantErr(t, "Insert", p.Insert([]byte("a"), value, insertEnv), nil)
+		liveBefore := src.live()
+
+		wantErr(t, "Delete", p.Delete([]byte("a"), nil), ErrNoPages)
+		if got := p.SlotCount(); got != 1 {
+			t.Errorf("SlotCount = %d, want 1", got)
+		}
+		if got := src.live(); got != liveBefore {
+			t.Errorf("src.live() = %d, want unchanged at %d", got, liveBefore)
+		}
+		mustCheck(t, p)
+	})
+}
+
+func TestGet(t *testing.T) {
+	big := make([]byte, 20_000)
+	for i := range big {
+		big[i] = byte(i % 251)
+	}
+	src := newMemPages()
+	env := &Env{Scratch: newTestPage(), Pages: src}
+
+	p := newLeaf(t)
+	wantErr(t, "Insert", p.Insert([]byte("big"), big, env), nil)
+	wantErr(t, "Insert", p.Insert([]byte("small"), []byte("hello"), env), nil)
+
+	t.Run("inline value", func(t *testing.T) {
+		got, err := p.Get([]byte("small"), nil, env)
+		wantErr(t, "Get", err, nil)
+		if string(got) != "hello" {
+			t.Errorf("Get(small) = %q, want %q", got, "hello")
+		}
+	})
+
+	t.Run("overflow value", func(t *testing.T) {
+		got, err := p.Get([]byte("big"), nil, env)
+		wantErr(t, "Get", err, nil)
+		if !bytes.Equal(got, big) {
+			t.Errorf("Get(big) returned %d bytes that differ from the original", len(got))
+		}
+	})
+
+	t.Run("missing key", func(t *testing.T) {
+		_, err := p.Get([]byte("nope"), nil, env)
+		wantErr(t, "Get", err, ErrKeyNotFound)
+	})
+
+	t.Run("overflow without page source", func(t *testing.T) {
+		_, err := p.Get([]byte("big"), nil, nil)
+		wantErr(t, "Get", err, ErrNoPages)
+	})
+
+	t.Run("appends to dst", func(t *testing.T) {
+		got, err := p.Get([]byte("small"), []byte("pre:"), env)
+		wantErr(t, "Get", err, nil)
+		if string(got) != "pre:hello" {
+			t.Errorf("Get = %q, want %q", got, "pre:hello")
+		}
+	})
+
+	t.Run("zero allocations with a reused buffer", func(t *testing.T) {
+		buf := make([]byte, 0, len(big))
+		key := []byte("big")
+		allocs := testing.AllocsPerRun(100, func() {
+			buf, _ = p.Get(key, buf[:0], env)
+		})
+		if allocs != 0 {
+			t.Errorf("Get allocated %.0f times per call, want 0", allocs)
+		}
+	})
+
+	mustCheck(t, p)
 }
