@@ -2,7 +2,7 @@
 
 An ordered key-value storage engine in pure Go, built from scratch to learn and demonstrate storage-engine internals: page layouts, concurrent B-link trees, optimistic locking, and memory reclamation outside the Go garbage collector.
 
-> **Status:** v2 is a design prototype with known correctness bugs; see [`docs/v2/v2-known-issues.md`](docs/v2/v2-known-issues.md). v3 is in progress; see [`docs/v3/v3-architecture-plan.md`](docs/v3/v3-architecture-plan.md).
+> **Status:** v2 is a design prototype with known correctness bugs; see [`docs/v2/v2-known-issues.md`](docs/v2/v2-known-issues.md). v3 is in progress: the **page format (phase 1) is built and fuzz-tested**; the arena is next. See [`docs/v3/v3-architecture-plan.md`](docs/v3/v3-architecture-plan.md).
 >
 > Do not store data you care about in v2.
 
@@ -12,7 +12,7 @@ An ordered key-value storage engine in pure Go, built from scratch to learn and 
 
 | | v1 | v2 | v3 |
 |---|---|---|---|
-| **State** | Superseded | Prototype on `main`, known bugs | In progress |
+| **State** | Superseded | Prototype on `main`, known bugs | In progress (page format done) |
 | **Structure** | Tree of leaves with Bw-tree-style delta chains | B-link tree of 4 KiB slotted pages | B-link tree of 8 KiB slotted pages |
 | **Memory** | Go heap | Go heap | `mmap`'d arena outside the Go heap |
 | **Concurrency** | Atomic flag gating consolidation | Optimistic Lock Coupling (version word per page) | OLC with atomic slot reads, bounded retries, restart from root |
@@ -74,25 +74,58 @@ Each phase ends with a gate that must pass before the next begins.
 
 | # | Phase | Gate | Status |
 |---|---|---|---|
-| 1 | Page format: header, slots with heads, fences, overflow records, lazy compaction, page invariant checker | Page fuzzing clean under 4 and 8 KiB builds; torn-slot test never reads out of bounds | In progress |
-| 2 | Arena and allocator: `mmap` slabs, sharded free lists, per-worker registration | 5M concurrent alloc/free at 0 allocs/op; race detector clean | Planned |
+| 1 | Page format: header, slots with heads, fences, overflow records, lazy compaction, page invariant checker | Page fuzzing clean under 4 and 8 KiB builds; torn-slot test never reads out of bounds | **Done** (results below) |
+| 2 | Arena and allocator: `mmap` slabs, sharded free lists, per-worker registration | 5M concurrent alloc/free at 0 allocs/op; race detector clean | Next |
 | 3 | Single-threaded tree: inner pages, splits, merges, zero-alloc API, scans | Tree fuzzing clean; 4 vs 8 KiB decided; v2-vs-v3 benchmark (allocs, GC pause, RSS) | Planned |
 | 4 | Concurrency: OLC, bounded retries, root compare-and-swap, EBR with lease | Concurrent stress with full-tree invariant check; 24-hour fuzz | Planned |
 | 5 | Durability: WAL with group commit, copy-on-write checkpoints, recovery | 1,000 injected crashes recover consistently | Planned |
 
 Beyond the storage engine, the long-term direction is etcd-shaped: MVCC revisions and Watch, then Raft replication and a gRPC API.
 
+### Phase 1: what was built
+
+The `page` package (start with [`page/doc.go`](page/doc.go)):
+
+| File | Contents |
+|---|---|
+| `geometry.go` | page geometry derived from one constant, with compile-time asserts |
+| `header.go` | the 64-byte header: packed fields read and written with 8-byte atomics |
+| `slot.go` | 8-byte slots with 3-byte key heads; binary search that bounds-checks every probe |
+| `fence.go` | fence keys, fence-derived prefix, and `Check()`, the page invariant checker |
+| `mutate.go` | Insert, Update (in place when it fits), Delete, Get; byte-exact space accounting |
+| `compact.go` | lazy compaction through a caller-owned scratch page (no allocation) |
+| `overflow.go` | values over the inline limit stored in chains of overflow pages |
+
+### Phase 1: gate results
+
+| Test | What it does | Build | Result |
+|---|---|---|---|
+| `FuzzPage` | random Insert/Update/Delete/Get/Compact scripts checked against a Go `map` after every operation, plus `Check()` and an overflow-page leak check | 8 KiB | 1 h, 122 M scripts, **0 failures** |
+| `FuzzPage` | same | 4 KiB | 1 h, pending |
+| `FuzzTornSlot` | arbitrary slot words and torn header fields fed to the reader path; must never panic | 8 KiB | 10 min, 25 M pages, **0 failures** |
+| `FuzzTornSlot` | same | 4 KiB | 10 min, pending |
+| `TestNoPageSizeLiterals` | no 4096/8192-derived numbers outside the build-tag files | both | pass |
+
+Fuzzing found one real bug during development: a torn `heapStart` larger than the page let the binary search index past the page end (the same crash class as v2 issue P23). The guard in `SeekSlot` now rejects it, and the failing input is pinned as a permanent regression seed.
+
 ---
 
 ## Running the tests
 
-Requires Go 1.22 or newer.
+Requires Go 1.24 or newer.
 
 ```bash
-go test ./...                              # unit and integration tests
+go test ./...                              # unit and integration tests (8 KiB pages)
+go test -tags page4k ./...                 # same, with 4 KiB pages
 go test -race ./...                        # race detector (v2 reports expected OLC races, see P26)
 go test -bench=. -benchmem ./...           # benchmarks (v2 numbers unreliable, see P39)
+
+# fuzzing the page format (add -tags page4k for 4 KiB pages)
+go test -run '^$' -fuzz FuzzPage     -fuzztime 1h  -fuzzminimizetime 1s ./page/
+go test -run '^$' -fuzz FuzzTornSlot -fuzztime 10m -fuzzminimizetime 1s ./page/
 ```
+
+`-fuzzminimizetime 1s` keeps the fuzzer from spending up to 60 s shrinking each new input, which otherwise looks like a stall.
 
 ---
 
@@ -105,6 +138,8 @@ docs/
 │   └── known-issues.md      44 issues: evidence, trigger, v3 resolution
 └── v3/
     └── architecture-plan.md v3 design, page-size decision, roadmap, research
+page/
+└── doc.go                   v3 page format overview (go doc ./page)
 ```
 
 v1 is not documented yet.

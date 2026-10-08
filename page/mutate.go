@@ -316,14 +316,14 @@ func (p *Page) Delete(suffix []byte, env *Env) error {
 // next dst. On error dst is returned unchanged. env.Pages is needed only for
 // overflow values.
 func (p *Page) Get(suffix, dst []byte, env *Env) ([]byte, error) {
-	idx, found, ok := p.SeekSlot(suffix)
+	_, s, found, ok := p.seek(suffix)
 	if !ok {
 		return dst, ErrPageInvariant
 	}
 	if !found {
 		return dst, ErrKeyNotFound
 	}
-	s := p.slotAt(idx)
+
 	if !s.ovf() {
 		return append(dst, p.valueBytes(s)...), nil
 	}

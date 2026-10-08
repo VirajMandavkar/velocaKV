@@ -151,25 +151,37 @@ func (p *Page) cmpSlot(s slot, suffix []byte, head uint32) int {
 //	found = true:  slot idx holds exactly this key.
 //	found = false: idx is where the key would be inserted (0..SlotCount).
 //	ok = false:    the page view is inconsistent; ignore idx and found and retry.
+func (p *Page) SeekSlot(suffix []byte) (idx int, found, ok bool) {
+	idx, _, found, ok = p.seek(suffix)
+	return idx, found, ok
+}
+
+// seek is SeekSlot that also returns the slot at idx, already validated with
+// recordOK (zero when idx == SlotCount). Readers must use this s rather than
+// loading the slot again: under lock-free reads a second load could return a
+// different, unchecked slot (P55).
 //
 // SlotCount and HeapStart are read once, so the whole search works on one
 // snapshot of the page.
-func (p *Page) SeekSlot(suffix []byte) (idx int, found, ok bool) {
+func (p *Page) seek(suffix []byte) (idx int, s slot, found, ok bool) {
 	head := keyHead(suffix)
 	n := int(p.SlotCount())
 	heapStart := int(p.HeapStart())
+	if heapStart > PageSize {
+		return 0, 0, false, false // heapStart past the page end: torn header (P56)
+	}
 	if slotOff(n) > heapStart {
-		return 0, false, false // slot directory runs into the heap: torn count
+		return 0, 0, false, false // slot directory runs into the heap: torn count
 	}
 
 	lo, hi := 0, n // invariant: keys left of lo are < suffix; keys at or right of hi are >= suffix
 	for lo < hi {
 		mid := lo + (hi-lo)/2
-		s := p.slotAt(mid)
-		if !recordOK(s, heapStart) {
-			return 0, false, false
+		ms := p.slotAt(mid)
+		if !recordOK(ms, heapStart) {
+			return 0, 0, false, false
 		}
-		if p.cmpSlot(s, suffix, head) > 0 {
+		if p.cmpSlot(ms, suffix, head) > 0 {
 			lo = mid + 1
 		} else {
 			hi = mid
@@ -178,11 +190,11 @@ func (p *Page) SeekSlot(suffix []byte) (idx int, found, ok bool) {
 
 	idx = lo
 	if idx < n { // slot n does not exist: never load it
-		s := p.slotAt(idx)
+		s = p.slotAt(idx) // plain '=': assigns the named result, does not shadow it
 		if !recordOK(s, heapStart) {
-			return 0, false, false
+			return 0, 0, false, false
 		}
 		found = p.cmpSlot(s, suffix, head) == 0
 	}
-	return idx, found, true
+	return idx, s, found, true
 }
