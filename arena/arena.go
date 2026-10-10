@@ -16,7 +16,10 @@ const (
 	idMask   = page.PagesPerSlab - 1
 )
 
-var ErrArenaFull = errors.New("arena: full")
+var (
+	ErrArenaFull = errors.New("arena: full")
+	ErrClosed    = errors.New("arena: closed")
+)
 
 // split returns the slab number and the byte offset inside that slab for page id.
 func split(id uint32) (slab, off int) {
@@ -24,9 +27,10 @@ func split(id uint32) (slab, off int) {
 }
 
 type Arena struct {
-	mu       sync.Mutex               // held only by grow
+	mu       sync.Mutex               // serializes grow and Close; guards closed
 	slabs    atomic.Pointer[[][]byte] // immutable table; replaced, never modified
 	maxSlabs int
+	closed   bool
 }
 
 // New returns an empty arena that may grow to at most maxBytes of slabs.
@@ -57,6 +61,10 @@ func (a *Arena) grow() (int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if a.closed {
+		return 0, ErrClosed
+	}
+
 	old := *a.slabs.Load()
 	if len(old) >= a.maxSlabs {
 		return 0, ErrArenaFull
@@ -73,4 +81,25 @@ func (a *Arena) grow() (int, error) {
 	a.slabs.Store(&next)
 
 	return len(old), nil
+}
+
+// Close unmaps every slab. The caller must ensure no other goroutine is
+// using the arena or any *page.Page from it. Calling Close twice is safe.
+func (a *Arena) Close() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.closed = true
+
+	old := *a.slabs.Load()
+	empty := [][]byte{}
+
+	a.slabs.Store(&empty)
+	var errs []error
+	for _, s := range old {
+		if err := unmapSlab(s); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
 }
