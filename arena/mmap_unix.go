@@ -7,16 +7,16 @@ import (
 	"fmt"
 	"syscall"
 	"unsafe"
+	"velocakv/page"
 )
 
-const slabBytes = 1 << 26
-
-// mapSlab maps one anonymous, private, read-write slab of slabBytes, outside the Go heap. If the base is not OS-page aligned,
-// it unmaps the slab and returns an error.
+// mapSlab maps one anonymous, private, read-write slab of page.SlabBytes,
+// outside the Go heap. If the base is not OS-page aligned, it unmaps the
+// slab and returns an error.
 func mapSlab() ([]byte, error) {
-	data, err := syscall.Mmap(-1, 0, slabBytes, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
+	data, err := syscall.Mmap(-1, 0, page.SlabBytes, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
 	if err != nil {
-		return nil, fmt.Errorf("arena: mmap %d-byte slab: %w", slabBytes, err)
+		return nil, fmt.Errorf("arena: mmap %d-byte slab: %w", page.SlabBytes, err)
 	}
 	const osPageAlign = 1 << 12
 	base := uintptr(unsafe.Pointer(&data[0]))
@@ -31,12 +31,12 @@ func mapSlab() ([]byte, error) {
 	return data, nil
 }
 
-// unmapSlab releases the slab of slabBytes .
-// The b must be a slice returned by mapSlab , and the caller must gurantee nothing touches the slab afterwards
-// Also calling it twice on the same slab returns an error
+// unmapSlab releases a slab returned by mapSlab. The caller must
+// guarantee nothing touches the slab afterwards. Calling it twice
+// on the same slab returns an error.
 func unmapSlab(b []byte) error {
 	if err := syscall.Munmap(b); err != nil {
-		return fmt.Errorf("aarena: munmap slab: %w", err)
+		return fmt.Errorf("arena: munmap slab: %w", err)
 	}
 	return nil
 }
