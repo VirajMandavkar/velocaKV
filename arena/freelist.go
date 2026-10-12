@@ -1,10 +1,25 @@
 package arena
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"unsafe"
+)
 
 type freeList struct {
 	head atomic.Uint64 // pack(popCount, top page ID); pack(0, 0) = empty
 }
+
+// shard is one free list padded to a full cache line, so two shards'
+// heads are never in the same 64-byte line (no false sharing).
+type shard struct {
+	freeList          // 8 bytes: the head word
+	_        [56]byte // padding up to 64
+}
+
+const (
+	_ = unsafe.Sizeof(shard{}) - 64 // fails to compile if shard < 64 bytes
+	_ = 64 - unsafe.Sizeof(shard{}) // fails to compile if shard > 64 bytes
+)
 
 // pack builds a free-list head word: popCount in the high 32 bits,
 // page ID in the low 32 bits.

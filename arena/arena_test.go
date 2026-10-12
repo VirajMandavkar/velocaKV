@@ -76,3 +76,35 @@ func TestArenaLifecycle(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 }
+
+func TestPopFreeSteals(t *testing.T) {
+	a, err := New(64 << 20)
+	if err != nil {
+		t.Fatalf("New Err: got %v want nil", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	if n, err := a.grow(); n != 0 || err != nil {
+		t.Fatalf("grow Err: got %v want nil\n int got %d want 0", err, n)
+	}
+	a.shards = make([]shard, 4)
+	cases := []struct {
+		s    int
+		want []uint32
+	}{
+		{0, []uint32{5, 9, 7, 0}},
+		{1, []uint32{9, 7, 5, 0}},
+		{2, []uint32{9, 7, 5, 0}},
+		{3, []uint32{7, 5, 9, 0}},
+	}
+	for _, c := range cases {
+		a.shards = make([]shard, 4) // fresh, empty shelves for each case
+		a.pushFree(0, 5)
+		a.pushFree(2, 9)
+		a.pushFree(3, 7)
+		for _, want := range c.want {
+			if got := a.popFree(c.s); got != want {
+				t.Errorf("worker %d: popFree = %d, want %d", c.s, got, want)
+			}
+		}
+	}
+}

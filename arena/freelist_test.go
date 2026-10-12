@@ -1,6 +1,7 @@
 package arena
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -132,4 +133,62 @@ func TestFreeListConcurrent(t *testing.T) {
 			t.Fatalf("missing page id %d", id)
 		}
 	}
+}
+
+const benchPages = 1024
+
+// newBenchArena returns an arena with one mapped slab.
+func newBenchArena(b *testing.B) *Arena {
+	b.Helper()
+	a, err := New(64 << 20)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = a.Close() })
+	if _, err := a.grow(); err != nil {
+		b.Fatal(err)
+	}
+	return a
+}
+
+func BenchmarkFreeListSingle(b *testing.B) {
+	a := newBenchArena(b)
+	var l freeList
+	for id := uint32(1); id <= benchPages; id++ {
+		l.push(a, id)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer() // don't count the setup above
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			id := l.pop(a)
+			if id == 0 {
+				b.Fatal("free list unexpectedly empty")
+			}
+			l.push(a, id)
+		}
+	})
+}
+
+func BenchmarkFreeListSharded(b *testing.B) {
+	a := newBenchArena(b)
+	a.shards = make([]shard, runtime.GOMAXPROCS(0)) // match this run's -cpu value
+	for id := uint32(1); id <= benchPages; id++ {
+		a.pushFree(int(id)%len(a.shards), id)
+	}
+
+	var next atomic.Int64
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		s := int(next.Add(1)-1) % len(a.shards)
+		for pb.Next() {
+			id := a.popFree(s)
+			if id == 0 {
+				b.Fatal("free list unexpectedly empty")
+			}
+			a.pushFree(s, id)
+		}
+	})
 }

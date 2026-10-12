@@ -3,6 +3,7 @@ package arena
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"velocakv/page"
@@ -31,6 +32,7 @@ type Arena struct {
 	slabs    atomic.Pointer[[][]byte] // immutable table; replaced, never modified
 	maxSlabs int
 	closed   bool
+	shards   []shard // one free list per P; index = worker's shard
 }
 
 // New returns an empty arena that may grow to at most maxBytes of slabs.
@@ -42,6 +44,7 @@ func New(maxBytes int64) (*Arena, error) {
 	a := &Arena{maxSlabs: int(maxSlab)}
 	empty := [][]byte{}
 	a.slabs.Store(&empty)
+	a.shards = make([]shard, runtime.GOMAXPROCS(0))
 	return a, nil
 }
 
@@ -102,4 +105,23 @@ func (a *Arena) Close() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// pushFree returns page id to shard s.
+func (a *Arena) pushFree(s int, id uint32) {
+	a.shards[s].push(a, id)
+}
+
+// popFree takes a free page ID, from shard s first, then stealing from
+// the other shards in order. It returns 0 if every shard is empty.
+func (a *Arena) popFree(s int) uint32 {
+	n := len(a.shards)
+	for i := 0; i < n; i++ {
+		idx := (s + i) % n
+		id := a.shards[idx].pop(a)
+		if id != 0 {
+			return id
+		}
+	}
+	return 0
 }
