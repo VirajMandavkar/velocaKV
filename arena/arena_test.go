@@ -2,6 +2,8 @@ package arena
 
 import (
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"unsafe"
 	"velocakv/page"
@@ -107,4 +109,145 @@ func TestPopFreeSteals(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestAllocFreeAndSteal(t *testing.T) {
+	a, err := New(130 << 20)
+	if err != nil {
+		t.Fatalf("New(130 MiB): %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	a.shards = make([]shard, 2)
+
+	alloc := func(worker int, wantID uint32, wantGen uint32) {
+		t.Helper()
+		id, p, err := a.alloc(worker)
+		if err != nil {
+			t.Fatalf("alloc(%d): %v", worker, err)
+		}
+		if id != wantID {
+			t.Fatalf("alloc(%d) ID = %d, want %d", worker, id, wantID)
+		}
+		if p == nil {
+			t.Fatalf("alloc(%d): got nil page, want generation %d", worker, wantGen)
+		}
+		if got := p.Gen(); got != wantGen {
+			t.Fatalf("alloc(%d) page generation = %d, want %d", worker, got, wantGen)
+		}
+	}
+
+	alloc(0, 1, 1)
+	alloc(0, 2, 1)
+	alloc(0, 3, 1)
+
+	a.free(0, 2)
+	a.free(0, 1)
+	for _, tc := range []struct {
+		id      uint32
+		wantNil bool
+	}{{1, true}, {2, true}, {3, false}} {
+		if got := a.page(tc.id); (got == nil) != tc.wantNil {
+			t.Errorf("page(%d) nil = %t, want %t", tc.id, got == nil, tc.wantNil)
+		}
+	}
+
+	alloc(1, 1, 3)
+	alloc(0, 2, 3)
+
+	a.free(0, 3)
+	mustPanic(t, func() { a.free(0, 3) })
+}
+
+func TestAllocUntilFull(t *testing.T) {
+	a, err := New(64 << 20)
+	if err != nil {
+		t.Fatalf("New(64 MiB): %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	a.shards = make([]shard, 1)
+
+	var freedID uint32
+	for i := 0; i < int(page.PagesPerSlab)-1; i++ {
+		id, _, err := a.alloc(0)
+		if err != nil {
+			t.Fatalf("alloc(%d): %v", i, err)
+		}
+		freedID = id
+	}
+
+	if _, _, err := a.alloc(0); !errors.Is(err, ErrArenaFull) {
+		t.Fatalf("alloc() error = %v, want %v", err, ErrArenaFull)
+	}
+
+	a.free(0, freedID)
+	if _, _, err := a.alloc(0); err != nil {
+		t.Fatalf("alloc() after free: %v", err)
+	}
+}
+
+func TestConcurrentAllocFreeNoDuplicateAndIncreasingGen(t *testing.T) {
+	a, err := New(1 << 30)
+	if err != nil {
+		t.Fatalf("New(1 GiB): %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	maxID := 16 * page.PagesPerSlab
+	owned := make([]atomic.Bool, maxID)
+	lastGen := make([]atomic.Uint32, maxID)
+
+	var wg sync.WaitGroup
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+
+			s := worker % len(a.shards)
+			hand := make([]uint32, 0, 16)
+			for i := 0; i < 50_000; i++ {
+				if len(hand) < 16 {
+					id, p, err := a.alloc(s)
+					if err != nil {
+						t.Errorf("worker %d alloc round %d: %v", worker, i, err)
+						return
+					}
+					if p == nil {
+						t.Errorf("worker %d alloc round %d page %d: got nil page", worker, i, id)
+						return
+					}
+					if int(id) >= maxID {
+						t.Errorf("worker %d alloc round %d: page ID %d exceeds max ID %d", worker, i, id, maxID-1)
+						return
+					}
+
+					gen := p.Gen()
+					if gen&1 != 1 {
+						t.Errorf("worker %d alloc round %d page %d: generation %d is even", worker, i, id, gen)
+						return
+					}
+					if !owned[id].CompareAndSwap(false, true) {
+						t.Errorf("worker %d alloc round %d: page %d is already owned", worker, i, id)
+						return
+					}
+					if old := lastGen[id].Swap(gen); gen <= old {
+						t.Errorf("worker %d alloc round %d page %d: generation %d did not increase from %d", worker, i, id, gen, old)
+						return
+					}
+					hand = append(hand, id)
+				} else {
+					id := hand[0]
+					hand = hand[1:]
+					owned[id].Store(false)
+					a.free(s, id)
+				}
+			}
+
+			for _, id := range hand {
+				owned[id].Store(false)
+				a.free(s, id)
+			}
+		}(w)
+	}
+	wg.Wait()
 }

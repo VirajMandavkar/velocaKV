@@ -32,7 +32,8 @@ type Arena struct {
 	slabs    atomic.Pointer[[][]byte] // immutable table; replaced, never modified
 	maxSlabs int
 	closed   bool
-	shards   []shard // one free list per P; index = worker's shard
+	shards   []shard       // one free list per P; index = worker's shard
+	next     atomic.Uint64 // the last fresh page ID handed out; 0 = none yet
 }
 
 // New returns an empty arena that may grow to at most maxBytes of slabs.
@@ -58,12 +59,16 @@ func (a *Arena) resolve(id uint32) *page.Page {
 	return (*page.Page)((*slabs)[slab][off : off+page.PageSize])
 }
 
-// grow maps one more slab and publishes it. It returns the new slab's
-// index, or ErrArenaFull if the arena already holds maxSlabs slabs.
+// grow maps one more slab. (Same behaviour as before; tests still use it.)
 func (a *Arena) grow() (int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.growLocked()
+}
 
+// growLocked is grow's old body, minus the Lock/Unlock lines.
+// The caller must hold a.mu.
+func (a *Arena) growLocked() (int, error) {
 	if a.closed {
 		return 0, ErrClosed
 	}
@@ -84,6 +89,21 @@ func (a *Arena) grow() (int, error) {
 	a.slabs.Store(&next)
 
 	return len(old), nil
+}
+
+// growTo makes sure slab number `slab` is mapped.
+func (a *Arena) growTo(slab int) error {
+	if slab < len(*a.slabs.Load()) {
+		return nil // fast path: already mapped, no lock
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for len(*a.slabs.Load()) <= slab { // re-check under the lock
+		if _, err := a.growLocked(); err != nil {
+			return err // ErrArenaFull or ErrClosed
+		}
+	}
+	return nil
 }
 
 // Close unmaps every slab. The caller must ensure no other goroutine is
