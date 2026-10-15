@@ -18,8 +18,9 @@ const (
 )
 
 var (
-	ErrArenaFull = errors.New("arena: full")
-	ErrClosed    = errors.New("arena: closed")
+	ErrArenaFull      = errors.New("arena: full")
+	ErrClosed         = errors.New("arena: closed")
+	ErrTooManyWorkers = errors.New("arena: too many workers")
 )
 
 // split returns the slab number and the byte offset inside that slab for page id.
@@ -28,12 +29,13 @@ func split(id uint32) (slab, off int) {
 }
 
 type Arena struct {
-	mu       sync.Mutex               // serializes grow and Close; guards closed
-	slabs    atomic.Pointer[[][]byte] // immutable table; replaced, never modified
-	maxSlabs int
-	closed   bool
-	shards   []shard       // one free list per P; index = worker's shard
-	next     atomic.Uint64 // the last fresh page ID handed out; 0 = none yet
+	mu        sync.Mutex // serializes grow, Close and worker registration; guards closed, freeSlots
+	slabs     atomic.Pointer[[][]byte]
+	maxSlabs  int
+	closed    bool
+	shards    []shard
+	next      atomic.Uint64
+	freeSlots []int // worker slot numbers not in use
 }
 
 // New returns an empty arena that may grow to at most maxBytes of slabs.
@@ -46,6 +48,11 @@ func New(maxBytes int64) (*Arena, error) {
 	empty := [][]byte{}
 	a.slabs.Store(&empty)
 	a.shards = make([]shard, runtime.GOMAXPROCS(0))
+	maxWorkers := 4 * runtime.GOMAXPROCS(0)
+	a.freeSlots = make([]int, maxWorkers)
+	for i := range a.freeSlots {
+		a.freeSlots[i] = len(a.freeSlots) - 1 - i
+	}
 	return a, nil
 }
 
