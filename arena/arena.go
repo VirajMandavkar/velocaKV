@@ -29,13 +29,16 @@ func split(id uint32) (slab, off int) {
 }
 
 type Arena struct {
-	mu        sync.Mutex // serializes grow, Close and worker registration; guards closed, freeSlots
-	slabs     atomic.Pointer[[][]byte]
-	maxSlabs  int
-	closed    bool
-	shards    []shard
-	next      atomic.Uint64
-	freeSlots []int // worker slot numbers not in use
+	mu           sync.Mutex // serializes grow, Close and worker registration; guards closed, freeSlots
+	slabs        atomic.Pointer[[][]byte]
+	maxSlabs     int
+	closed       bool
+	shards       []shard
+	next         atomic.Uint64
+	freeSlots    []int         // worker slot numbers not in use
+	prefaultCh   chan uint64   // window numbers to fault in
+	prefaultStop chan struct{} // closed by Close: tells the goroutine to exit
+	prefaultDone chan struct{} // closed by the goroutine when it has exited
 }
 
 // New returns an empty arena that may grow to at most maxBytes of slabs.
