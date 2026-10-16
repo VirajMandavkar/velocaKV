@@ -7,7 +7,7 @@ import (
 
 // slot is one 8-byte slot directory entry describing one record:
 //
-//	bit 63        51 50       38 37       26   25  24  23       0
+//	bit 63        51|50       38|37       26| 25  | 24  |23      0|
 //	    | offset 13 | keyLen 13 | valLen 12 | OVF | RSV | head 24 |
 //
 //	offset  where the record starts in the page
