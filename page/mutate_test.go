@@ -2,6 +2,7 @@ package page
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -109,9 +110,6 @@ func TestInsertOverflow(t *testing.T) {
 		if got := p.SlotCount(); got != 1 {
 			t.Fatalf("SlotCount = %d, want 1", got)
 		}
-		if got := p.Flags() & FlagHasOverflow; got == 0 {
-			t.Errorf("page flags = %#x, want FlagHasOverflow", p.Flags())
-		}
 		if !p.slotAt(0).ovf() {
 			t.Errorf("slot 0 OVF = false, want true")
 		}
@@ -161,6 +159,49 @@ func TestInsertOverflow(t *testing.T) {
 		}
 		if got := pages.live(); got != 0 {
 			t.Errorf("live pages = %d, want 0 (no leak)", got)
+		}
+		mustCheck(t, p)
+	})
+}
+
+func TestPutMaxValueLen(t *testing.T) {
+	t.Run("maximum value", func(t *testing.T) {
+		p := newLeaf(t)
+		src := newMemPages()
+		env := &Env{Scratch: newTestPage(), Pages: src}
+		value := patterned(MaxValueLen, 7)
+
+		inserted, err := p.Put([]byte("max"), value, env)
+		if err != nil || !inserted {
+			t.Fatalf("Put = (%v, %v), want (true, nil)", inserted, err)
+		}
+		got, err := p.Get([]byte("max"), nil, env)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if !bytes.Equal(got, value) {
+			t.Errorf("Get returned %d bytes that differ from the value", len(got))
+		}
+		if got := src.live(); got != overflowPages(MaxValueLen) {
+			t.Errorf("src.live() = %d, want %d", got, overflowPages(MaxValueLen))
+		}
+		mustCheck(t, p)
+	})
+
+	t.Run("value over maximum is rejected before allocation", func(t *testing.T) {
+		p := newLeaf(t)
+		src := newMemPages()
+		env := &Env{Scratch: newTestPage(), Pages: src}
+
+		inserted, err := p.Put([]byte("too-large"), make([]byte, MaxValueLen+1), env)
+		if inserted || !errors.Is(err, ErrTooLarge) {
+			t.Fatalf("Put = (%v, %v), want (false, %v)", inserted, err, ErrTooLarge)
+		}
+		if got := p.SlotCount(); got != 0 {
+			t.Errorf("SlotCount() = %d, want 0", got)
+		}
+		if got := src.live(); got != 0 {
+			t.Errorf("src.live() = %d, want 0", got)
 		}
 		mustCheck(t, p)
 	})

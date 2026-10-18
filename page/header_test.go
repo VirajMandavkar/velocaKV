@@ -116,10 +116,42 @@ func TestHeaderInitEmptyLeaf(t *testing.T) {
 
 // Test 5: test pages are 8-byte aligned.
 func TestTestPageAligned(t *testing.T) {
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		if uintptr(unsafe.Pointer(newTestPage()))%8 != 0 {
 			t.Fatal("misaligned test page")
 		}
+	}
+}
+
+func TestTreeLinks(t *testing.T) {
+	p := newTestPage()
+	if err := p.Format(KindInner, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	p.SetGen(5)
+	p.SetLink(9)
+	gen, count, heap, link := p.Gen(), p.SlotCount(), p.HeapStart(), p.Link()
+
+	const sib = 0x00000003_0000002A   // gen 3, page 42
+	const upper = 0x00000007_00000063 // gen 7, page 99
+	p.SetRightSib(sib)
+	p.SetUpperChild(upper)
+
+	if got := p.RightSib(); got != sib {
+		t.Errorf("RightSib = %#x, want %#x", got, sib)
+	}
+	if got := p.UpperChild(); got != upper {
+		t.Errorf("UpperChild = %#x, want %#x", got, upper)
+	}
+	// Neighbouring fields must be untouched.
+	if p.Gen() != gen || p.SlotCount() != count || p.HeapStart() != heap || p.Link() != link {
+		t.Errorf("a neighbouring header field changed")
+	}
+
+	// Init resets both links to 0.
+	p.Init(KindInner)
+	if p.RightSib() != 0 || p.UpperChild() != 0 {
+		t.Errorf("after Init: RightSib = %#x, UpperChild = %#x, want 0, 0", p.RightSib(), p.UpperChild())
 	}
 }
 

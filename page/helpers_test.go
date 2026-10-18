@@ -82,6 +82,10 @@ func patterned(n int, seed byte) []byte {
 	return v
 }
 
+// valueAt returns the value area of slot idx (see valueBytes).
+// Internal: the slice changes whenever the page does. Get copies instead.
+func (p *Page) valueAt(idx int) []byte { return p.valueBytes(p.slotAt(idx)) }
+
 // ---------- assertions ----------
 
 // mustCheck fails the test if any page invariant is broken.

@@ -39,15 +39,14 @@ const (
 )
 
 // Page flags, stored in header byte 13.
-const (
-	FlagHasOverflow = 1 << 0 // the page holds at least one overflow record
-	FlagAppendHint  = 1 << 1 // the last insert went at the end (split hint)
-)
+const FlagAppendHint = 1 << 1 // the last insert went at the end (split hint)
 
 // Byte offset where each header word starts.
 const (
 	word1 = 8  // gen | kind | flags | slotCount
 	word2 = 16 // link
+	word3 = 24 // rightSib
+	word4 = 32 // upperChild
 	word5 = 40 // heapStart | deadBytes | lowFenceOff | lowFenceLen
 	word6 = 48 // highFenceOff | highFenceLen | prefixLen | reserved
 )
@@ -135,8 +134,7 @@ func (p *Page) Gen() uint32 { return uint32(p.get(word1, shiftGen, mask32)) }
 // Kind returns the page type: KindLeaf, KindInner or KindOverflow.
 func (p *Page) Kind() uint8 { return uint8(p.get(word1, shiftKind, mask8)) }
 
-// Flags returns the flag byte: any combination of FlagHasOverflow and
-// FlagAppendHint. Test a flag with Flags()&FlagX != 0.
+// Flags returns the flag byte:FlagAppendHint. Test a flag with Flags()&FlagX != 0.
 func (p *Page) Flags() uint8 { return uint8(p.get(word1, shiftFlags, mask8)) }
 
 // SlotCount returns the number of records (slots) on the page.
@@ -253,10 +251,52 @@ func (p *Page) Link() uint64 { return atomic.LoadUint64(p.word(word2)) }
 // SetLink stores the next page ID (0 = end of chain).
 //
 //	In:    v  a page ID (must fit in 32 bits)
-//	Rules: one atomic store. Only the pages current owner writes it:
+//	Rules: one atomic store. Only the page's current owner writes it:
 //	       the overflow writer while the page is live, the free list while
 //	       it is free.
 func (p *Page) SetLink(v uint64) { atomic.StoreUint64(p.word(word2), v) }
+
+// ---------------------------------------------------------------------------
+// Words 3-4: rightSib, upperChild (tree layer).
+//
+// Each field is a whole 8-byte word holding a page descriptor:
+//
+//	bits 63..32  gen     the target page's gen when the link was made
+//	bits 31..0   pageID  the target page; 0 = no page
+//
+// A descriptor of 0 means "none". The page package never interprets the
+// value; the tree layer packs and checks it (a gen mismatch means the
+// target was recycled). Init resets both words to 0.
+// ---------------------------------------------------------------------------
+
+// RightSib returns the descriptor of this page's right sibling: the next
+// page on the same tree level (B-link). 0 means none (rightmost page).
+//
+//	Rules: lock-free (one atomic load). A reader that finds a key at or
+//	       above this page's high fence follows this link (move right).
+func (p *Page) RightSib() uint64 { return atomic.LoadUint64(p.word(word3)) }
+
+// SetRightSib stores the right sibling's descriptor (0 = none).
+//
+//	In:    v  descriptor: gen<<32 | pageID
+//	Rules: the caller holds the page write lock. One atomic store, so a
+//	       lock-free reader sees either the old sibling or the new one.
+//	       On a split, the new right page must be fully built before this
+//	       store publishes it.
+func (p *Page) SetRightSib(v uint64) { atomic.StoreUint64(p.word(word3), v) }
+
+// UpperChild returns the descriptor of an inner page's rightmost child:
+// the child for keys at or above the last separator. Meaningless on leaf
+// and overflow pages.
+//
+//	Rules: lock-free (one atomic load).
+func (p *Page) UpperChild() uint64 { return atomic.LoadUint64(p.word(word4)) }
+
+// SetUpperChild stores an inner page's rightmost-child descriptor.
+//
+//	In:    v  descriptor: gen<<32 | pageID
+//	Rules: the caller holds the page write lock. One atomic store.
+func (p *Page) SetUpperChild(v uint64) { atomic.StoreUint64(p.word(word4), v) }
 
 // ---------------------------------------------------------------------------
 // Whole-header reset.

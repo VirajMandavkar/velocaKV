@@ -29,16 +29,13 @@ func split(id uint32) (slab, off int) {
 }
 
 type Arena struct {
-	mu           sync.Mutex // serializes grow, Close and worker registration; guards closed, freeSlots
-	slabs        atomic.Pointer[[][]byte]
-	maxSlabs     int
-	closed       bool
-	shards       []shard
-	next         atomic.Uint64
-	freeSlots    []int         // worker slot numbers not in use
-	prefaultCh   chan uint64   // window numbers to fault in
-	prefaultStop chan struct{} // closed by Close: tells the goroutine to exit
-	prefaultDone chan struct{} // closed by the goroutine when it has exited
+	mu        sync.Mutex // serializes grow, Close and worker registration; guards closed, freeSlots
+	slabs     atomic.Pointer[[][]byte]
+	maxSlabs  int
+	closed    bool
+	shards    []shard
+	next      atomic.Uint64
+	freeSlots []int // worker slot numbers not in use
 }
 
 // New returns an empty arena that may grow to at most maxBytes of slabs.
@@ -67,13 +64,6 @@ func (a *Arena) resolve(id uint32) *page.Page {
 		return nil
 	}
 	return (*page.Page)((*slabs)[slab][off : off+page.PageSize])
-}
-
-// grow maps one more slab. (Same behaviour as before; tests still use it.)
-func (a *Arena) grow() (int, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.growLocked()
 }
 
 // growLocked is grow's old body, minus the Lock/Unlock lines.
@@ -146,7 +136,7 @@ func (a *Arena) pushFree(s int, id uint32) {
 // the other shards in order. It returns 0 if every shard is empty.
 func (a *Arena) popFree(s int) uint32 {
 	n := len(a.shards)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		idx := (s + i) % n
 		id := a.shards[idx].pop(a)
 		if id != 0 {

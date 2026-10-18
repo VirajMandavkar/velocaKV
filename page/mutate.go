@@ -2,7 +2,6 @@ package page
 
 import (
 	"errors"
-	"math"
 )
 
 // Errors returned by page operations.
@@ -59,12 +58,9 @@ func (p *Page) carve(suffix, val []byte) int {
 }
 
 // shiftRight moves slots idx..n-1 one position up, opening a gap at idx.
-// It copies from the end backwards so no slot is overwritten before it moves.
-// The caller has checked that slot n fits below heapStart.
+// copy is a memmove, so the overlapping ranges are handled correctly.
 func (p *Page) shiftRight(idx, n int) {
-	for i := n - 1; i >= idx; i-- {
-		p.setSlotAt(i+1, p.slotAt(i))
-	}
+	copy(p[slotOff(idx+1):slotOff(n+1)], p[slotOff(idx):slotOff(n)])
 }
 
 // shiftLeft closes the gap at idx by moving slots idx+1..n-1 down one
@@ -72,9 +68,7 @@ func (p *Page) shiftRight(idx, n int) {
 // which recordOK always rejects, so a reader holding a stale count retries
 // instead of reading a duplicate.
 func (p *Page) shiftLeft(idx, n int) {
-	for i := idx; i < n-1; i++ {
-		p.setSlotAt(i, p.slotAt(i+1))
-	}
+	copy(p[slotOff(idx):slotOff(n-1)], p[slotOff(idx+1):slotOff(n)])
 	p.setSlotAt(n-1, 0)
 }
 
@@ -107,10 +101,6 @@ func (p *Page) valueBytes(s slot) []byte {
 	return p[start : start+s.valLen()]
 }
 
-// valueAt returns the value area of slot idx (see valueBytes).
-// Internal: the slice changes whenever the page does. Get copies instead.
-func (p *Page) valueAt(idx int) []byte { return p.valueBytes(p.slotAt(idx)) }
-
 // makeRoom ensures need bytes of free space, compacting if that is enough.
 // It returns ErrNeedSplit when even compaction would not make room.
 func (p *Page) makeRoom(need int, env *Env) error {
@@ -134,9 +124,10 @@ func (p *Page) checkRecord(suffix, val []byte) error {
 	if len(suffix) > MaxKeyLen {
 		return ErrTooLarge
 	}
-	if int64(len(val)) > math.MaxUint32 { // totalLen in the overflow stub is a uint32
+	if int64(len(val)) > MaxValueLen { // totalLen in the overflow stub is a uint32
 		return ErrTooLarge
 	}
+
 	// A zero-length record on a page with no fences would start at PageSize,
 	// which the 13-bit offset cannot hold. On such a page an empty suffix
 	// means the full key is empty.
@@ -151,27 +142,28 @@ func isOverflow(suffix, val []byte) bool {
 	return len(suffix)+len(val) > MaxInlineRecord
 }
 
-// ---------- public operations ----------
-
-// Insert adds a new key with its value. suffix is the key with the page
-// prefix already removed.
+// insertNew writes a new record at slot position idx. It is the part of
+// Insert and Put that runs after the search.
 //
-// Values too big for the page go to an overflow chain (needs env.Pages).
-// If the page lacks free space but deleted records would make room, it
-// compacts first (needs env.Scratch). Leaf space is checked before any chain
-// is written, so ErrNeedSplit never wastes overflow pages.
-func (p *Page) Insert(suffix, val []byte, env *Env) error {
-	if err := p.checkRecord(suffix, val); err != nil {
-		return err
-	}
-	idx, found, ok := p.SeekSlot(suffix)
-	if !ok {
-		return ErrPageInvariant
-	}
-	if found {
-		return ErrKeyExists
-	}
-
+//	In:   idx     insert position from seek on this page, with found = false
+//	      suffix  the key with the page prefix already removed
+//	      val     the value; bigger than MaxInlineRecord goes to an overflow chain
+//	      env     Scratch if compaction may run; Pages if the value is overflow
+//	Out:  nil, or:
+//	      ErrNoPages    the value needs an overflow chain but env.Pages is nil
+//	                    (checked before anything is touched)
+//	      ErrNeedSplit  no room even after compaction; the page is unchanged
+//	      ErrNoScratch  compaction was needed but env.Scratch is missing
+//	      any error from env.Pages.Alloc while writing the chain
+//	Rules:
+//	  - The page must not change between the seek and this call: idx would
+//	    point at the wrong place.
+//	  - Compaction may run first. It keeps slot order, so idx stays valid.
+//	  - Leaf space is checked before any chain is written, so ErrNeedSplit
+//	    never wastes overflow pages. If writing the chain fails, the page is
+//	    unchanged apart from a possible compaction.
+//	  - Caller holds the page write lock.
+func (p *Page) insertNew(idx int, suffix, val []byte, env *Env) error {
 	ovf := isOverflow(suffix, val)
 	inLeaf := len(val) // bytes the value takes inside the page
 	if ovf {
@@ -195,33 +187,34 @@ func (p *Page) Insert(suffix, val []byte, env *Env) error {
 	var stub [ovfStubSize]byte // on the stack: no allocation
 	putStub(stub[:], head, uint32(len(val)))
 	p.insertAt(idx, suffix, stub[:], true)
-	p.SetFlags(p.Flags() | FlagHasOverflow)
 	return nil
 }
 
-// Update replaces the value of an existing key. It handles all four
-// combinations of an old and a new value being inline or overflow.
+// updateFound replaces the value of the record at slot idx. It is the part
+// of Update and Put that runs after the search, and it handles all four
+// cases of an old and a new value being inline or overflow.
 //
-// If the new value's in-page bytes fit where the old ones were, it is written
-// in place and only the leftover tail becomes dead. Otherwise a fresh copy is
-// carved (compacting first if needed). An old overflow chain is freed last,
-// after the slot no longer points at it.
-//
-// env.Scratch is needed if the page may need compaction; env.Pages is needed
-// if the old or the new value is overflow.
-func (p *Page) Update(suffix, val []byte, env *Env) error {
-	if err := p.checkRecord(suffix, val); err != nil {
-		return err
-	}
-	idx, found, ok := p.SeekSlot(suffix)
-	if !ok {
-		return ErrPageInvariant
-	}
-	if !found {
-		return ErrKeyNotFound
-	}
-	old := p.slotAt(idx)
-
+//	In:   idx     slot position from seek on this page, with found = true
+//	      old     the slot seek returned for idx (never re-load it: P55)
+//	      suffix  the key with the page prefix already removed
+//	      val     the new value
+//	      env     Scratch if compaction may run; Pages if the old or the new
+//	              value is overflow
+//	Out:  nil, or:
+//	      ErrNoPages    an overflow chain must be written or freed, but
+//	                    env.Pages is nil (checked before anything is touched)
+//	      ErrNeedSplit  the bigger value doesn't fit even after compaction;
+//	                    the old value is still live and unchanged
+//	      ErrNoScratch  compaction was needed but env.Scratch is missing
+//	      any error from env.Pages.Alloc while writing the new chain
+//	Rules:
+//	  - If the new in-page bytes fit where the old ones were, they are
+//	    written in place and only the leftover tail becomes dead bytes.
+//	    Otherwise a fresh copy is carved, compacting first if needed.
+//	  - The old stub is read before anything is overwritten, and the old
+//	    chain is freed last, after the slot no longer points at it.
+//	  - Caller holds the page write lock.
+func (p *Page) updateFound(idx int, old slot, suffix, val []byte, env *Env) error {
 	newOvf := isOverflow(suffix, val)
 	newLen := len(val) // bytes the new value takes inside the page
 	if newOvf {
@@ -264,9 +257,6 @@ func (p *Page) Update(suffix, val []byte, env *Env) error {
 	} else {
 		p.replaceAt(idx, suffix, newBytes, newOvf)
 	}
-	if newOvf {
-		p.SetFlags(p.Flags() | FlagHasOverflow)
-	}
 
 	if old.ovf() {
 		// TODO(concurrency): retire via EBR instead of freeing immediately.
@@ -275,19 +265,66 @@ func (p *Page) Update(suffix, val []byte, env *Env) error {
 	return nil
 }
 
-// Delete removes a key. Its record becomes dead bytes (there are no
-// tombstones). For an overflow record the slot is removed first and the
-// chain freed afterwards, so a live slot never points at freed pages.
-// env.Pages is needed only if the record is overflow.
-func (p *Page) Delete(suffix []byte, env *Env) error {
+// ---------- public operations ----------
+
+// Insert adds a new key with its value. suffix is the key with the page
+// prefix already removed.
+//
+// Values too big for the page go to an overflow chain (needs env.Pages).
+// If the page lacks free space but deleted records would make room, it
+// compacts first (needs env.Scratch). Leaf space is checked before any chain
+// is written, so ErrNeedSplit never wastes overflow pages.
+func (p *Page) Insert(suffix, val []byte, env *Env) error {
+	if err := p.checkRecord(suffix, val); err != nil {
+		return err
+	}
 	idx, found, ok := p.SeekSlot(suffix)
+	if !ok {
+		return ErrPageInvariant
+	}
+	if found {
+		return ErrKeyExists
+	}
+
+	return p.insertNew(idx, suffix, val, env)
+}
+
+// Update replaces the value of an existing key. It handles all four
+// combinations of an old and a new value being inline or overflow.
+//
+// If the new value's in-page bytes fit where the old ones were, it is written
+// in place and only the leftover tail becomes dead. Otherwise a fresh copy is
+// carved (compacting first if needed). An old overflow chain is freed last,
+// after the slot no longer points at it.
+//
+// env.Scratch is needed if the page may need compaction; env.Pages is needed
+// if the old or the new value is overflow.
+func (p *Page) Update(suffix, val []byte, env *Env) error {
+	if err := p.checkRecord(suffix, val); err != nil {
+		return err
+	}
+	idx, old, found, ok := p.seek(suffix)
 	if !ok {
 		return ErrPageInvariant
 	}
 	if !found {
 		return ErrKeyNotFound
 	}
-	old := p.slotAt(idx)
+	return p.updateFound(idx, old, suffix, val, env)
+}
+
+// Delete removes a key. Its record becomes dead bytes (there are no
+// tombstones). For an overflow record the slot is removed first and the
+// chain freed afterwards, so a live slot never points at freed pages.
+// env.Pages is needed only if the record is overflow.
+func (p *Page) Delete(suffix []byte, env *Env) error {
+	idx, old, found, ok := p.seek(suffix)
+	if !ok {
+		return ErrPageInvariant
+	}
+	if !found {
+		return ErrKeyNotFound
+	}
 
 	var head, total uint32
 	if old.ovf() {
@@ -337,4 +374,38 @@ func (p *Page) Get(suffix, dst []byte, env *Env) ([]byte, error) {
 		return dst, ErrPageInvariant // the stub and the chain disagree
 	}
 	return out, nil
+}
+
+// Put stores val under suffix: it inserts the key if it is new, and
+// replaces its value if it exists. It does one search, where Insert followed
+// by Update would do two.
+//
+//	In:   suffix  the key with the page prefix already removed
+//	      val     the value; bigger than MaxInlineRecord goes to an overflow chain
+//	      env     Scratch if compaction may run; Pages for overflow values
+//	Out:  inserted  true if the key was new, false if an existing value was
+//	                replaced (always false when err != nil)
+//	      err       nil, or ErrTooLarge / ErrEmptyKey (bad record),
+//	                ErrPageInvariant (torn page view: retry),
+//	                ErrNeedSplit (page full: the tree splits and retries),
+//	                ErrNoPages, ErrNoScratch, or an allocation error
+//	Rules:
+//	  - On any error the page holds exactly what it held before, apart from
+//	    a possible compaction, which never changes keys or values.
+//	  - Caller holds the page write lock.
+func (p *Page) Put(suffix, val []byte, env *Env) (inserted bool, err error) {
+	if err := p.checkRecord(suffix, val); err != nil {
+		return false, err
+	}
+	idx, old, found, ok := p.seek(suffix)
+	if !ok {
+		return false, ErrPageInvariant
+	}
+	if found {
+		return false, p.updateFound(idx, old, suffix, val, env)
+	}
+	if err := p.insertNew(idx, suffix, val, env); err != nil {
+		return false, err
+	}
+	return true, nil
 }

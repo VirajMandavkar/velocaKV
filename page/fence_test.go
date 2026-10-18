@@ -157,3 +157,41 @@ func TestFenceReadsNoAlloc(t *testing.T) {
 		t.Errorf("fence reads allocated %.0f times", allocs)
 	}
 }
+
+func TestCheckFenceRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		low, high string
+		suffix    string // what the page stores (key minus prefix)
+		wantErr   bool
+	}{
+		{"inside", "m", "n", "m5", false},
+		{"equal to low is inside", "m", "n", "m", false},
+		{"below low", "m", "n", "a", true},
+		{"equal to high is outside", "m", "n", "n", true},
+		{"above high", "m", "n", "z", true},
+		{"prefix k: inside", "ka", "kc", "bz", false}, // key "kbz"
+		{"prefix k: at high", "ka", "kc", "c", true},  // key "kc"
+		{"prefix k: below low", "ka", "kc", "", true}, // key "k" < "ka"
+		{"no high fence", "m", "", "zzz", false},      // +inf
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newTestPage()
+			var high []byte
+			if tt.high != "" {
+				high = []byte(tt.high)
+			}
+			if err := p.Format(KindLeaf, []byte(tt.low), high); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Insert([]byte(tt.suffix), []byte("v"), nil); err != nil {
+				t.Fatalf("Insert: %v", err)
+			}
+			err := p.Check()
+			if tt.wantErr != (err != nil) || (err != nil && !errors.Is(err, ErrPageInvariant)) {
+				t.Errorf("Check() = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

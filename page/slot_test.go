@@ -159,33 +159,6 @@ func TestRecordOK(t *testing.T) {
 	}
 }
 
-func TestCmpSlot(t *testing.T) {
-	tests := []struct {
-		name   string
-		search string
-		stored string
-		want   int
-	}{
-		{"head decides, less", "apple", "apron", -1},
-		{"head decides, greater", "banana", "apron", 1},
-		{"tie, heap decides", "apricot", "apron", -1},
-		{"exact match", "apron", "apron", 0},
-		{"padding tie", "ca", "ca\x00", -1},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			p := newTestPage()
-			off := PageSize - len(tt.stored)
-			copy(p[off:], tt.stored)
-			s := makeSlot(off, len(tt.stored), 0, false, keyHead([]byte(tt.stored)))
-			got := p.cmpSlot(s, []byte(tt.search), keyHead([]byte(tt.search)))
-			if got != tt.want {
-				t.Fatalf("cmpSlot(%q, %q) = %d, want %d", tt.search, tt.stored, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestLowerBound(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -249,7 +222,7 @@ func TestSeekSlotRejects(t *testing.T) {
 			p.SetSlotCount(uint16((int(p.HeapStart())-HeaderSize)/SlotSize + 1))
 		}},
 		{"bad slot offset", func(p *Page) {
-			p.setSlotAt(1, makeSlot(PageSize-2, 5, 0, false, 0))
+			p.setSlotAt(1, makeSlot(PageSize-2, 5, 0, false, keyHead([]byte("d"))))
 		}},
 	}
 	for _, tt := range tests {

@@ -21,19 +21,17 @@ func (p *Page) Compact(scratch *Page) {
 	top := fenceStart
 
 	// Pass 1: pack each record into scratch, in slot order, below the fences.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s := p.slotAt(i)
 		size := s.keyLen() + s.valLen()
 		top -= size
 		copy(scratch[top:], p[s.off():s.off()+size])
-		scratch.setSlotAt(i, s.withOff(top))
+		*scratch.word(slotOff(i)) = uint64(s.withOff(top)) // plain store: scratch is private to this worker
 	}
 
 	// Pass 2: copy the packed bytes and the updated slots back.
 	copy(p[top:fenceStart], scratch[top:fenceStart])
-	for i := 0; i < n; i++ {
-		p.setSlotAt(i, scratch.slotAt(i))
-	}
+	copy(p[HeaderSize:slotOff(n)], scratch[HeaderSize:slotOff(n)])
 	p.SetHeapStart(uint16(top))
 	p.SetDeadBytes(0)
 }

@@ -36,6 +36,10 @@ const (
 
 	// PagesPerSlab is how many pages one slab holds.
 	PagesPerSlab = SlabBytes >> PageBits
+
+	// MaxValueLen is the largest value a record may hold (1.5 MiB).
+	// Bigger values are rejected with ErrTooLarge before anything is written.
+	MaxValueLen = 3 << 19
 )
 
 // Slot field widths (the bit layout is in slot.go) and the overflow stub size.
@@ -59,4 +63,5 @@ const (
 	_ = uint(MaxInlineRecord - (MaxKeyLen + ovfStubSize))           // G6: an overflow stub record fits inline
 	_ = uint((1<<slotValLenBits - 1) - MaxInlineRecord)             // G7: an inline value fits valLen
 	_ = uint((1<<slotKeyLenBits - 1) - MaxKeyLen)                   // G7: a key fits keyLen
+	_ = uint(math.MaxUint32 - MaxValueLen)                          // G8: a max value fits the stub's uint32 totalLen
 )

@@ -113,7 +113,7 @@ func (p *Page) Check() error {
 	if kind > KindOverflow {
 		return fmt.Errorf("%w: unknown kind %d", ErrPageInvariant, kind)
 	}
-	if f := p.Flags(); f&^(FlagHasOverflow|FlagAppendHint) != 0 {
+	if f := p.Flags(); f&^FlagAppendHint != 0 {
 		return fmt.Errorf("%w: unknown flag bits %#x", ErrPageInvariant, f)
 	}
 
@@ -155,6 +155,8 @@ func (p *Page) Check() error {
 	}
 
 	// Records: each readable, below the fences, keys strictly ascending.
+	pl := int(p.PrefixLen())
+	lowRest, highRest := low[pl:], high[pl:]
 	fenceStart := PageSize - p.fenceBytes()
 	var prev []byte
 	for i := range n {
@@ -170,6 +172,12 @@ func (p *Page) Check() error {
 		key := p[s.off() : s.off()+s.keyLen()]
 		if i > 0 && bytes.Compare(prev, key) >= 0 {
 			return fmt.Errorf("%w: slot %d key %q not after %q", ErrPageInvariant, i, key, prev)
+		}
+		if bytes.Compare(key, lowRest) < 0 {
+			return fmt.Errorf("%w: slot %d key %q below low fence %q", ErrPageInvariant, i, key, low)
+		}
+		if !highInf && bytes.Compare(key, highRest) >= 0 {
+			return fmt.Errorf("%w: slot %d key %q not below high fence %q", ErrPageInvariant, i, key, high)
 		}
 		prev = key
 	}

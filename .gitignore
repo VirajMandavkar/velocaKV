@@ -1,2 +1,10 @@
 *.prof
 *.test
+*.out
+*.test
+old.txt
+new.txt
+seek_*.txt
+put.txt
+nf_*.txt
+asm_*.txt
