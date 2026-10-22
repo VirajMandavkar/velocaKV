@@ -1,6 +1,9 @@
 package page
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
 // Overflow records.
 //
@@ -116,4 +119,35 @@ func readChain(src PageSource, head, totalLen uint32, dst []byte) ([]byte, bool)
 		return dst[:start], false
 	}
 	return dst, true
+}
+
+// AppendOverflowIDs appends the ID of every overflow page used by p's
+// records to dst, in slot order, and checks each chain: every page must be
+// a live KindOverflow page, and the chain must have exactly
+// overflowPages(totalLen) pages, ending in link 0.
+//
+// Call it only after p.Check has passed, so every slot's stub lies inside
+// the page. It is for checkers and tests, not hot paths.
+func (p *Page) AppendOverflowIDs(dst []uint32, src PageSource) ([]uint32, error) {
+	for i := range int(p.SlotCount()) {
+		s := p.slotAt(i)
+		if !s.ovf() {
+			continue
+		}
+		id, totalLen := readStub(p[s.off()+s.keyLen():])
+		want := overflowPages(int(totalLen))
+		for n := range want {
+			op := src.Page(id)
+			if op == nil || op.Kind() != KindOverflow {
+				return dst, fmt.Errorf("%w: slot %d: chain page %d (id %d) is not a live overflow page",
+					ErrPageInvariant, i, n, id)
+			}
+			dst = append(dst, id)
+			id = uint32(op.Link())
+		}
+		if id != 0 {
+			return dst, fmt.Errorf("%w: slot %d: chain longer than %d pages", ErrPageInvariant, i, want)
+		}
+	}
+	return dst, nil
 }

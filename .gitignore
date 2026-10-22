@@ -8,3 +8,4 @@ seek_*.txt
 put.txt
 nf_*.txt
 asm_*.txt
+*.log

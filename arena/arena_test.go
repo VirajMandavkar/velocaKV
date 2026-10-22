@@ -9,6 +9,13 @@ import (
 	"velocakv/page"
 )
 
+func wantLive(t *testing.T, a *Arena, want int) {
+	t.Helper()
+	if got := a.LivePages(); got != want {
+		t.Fatalf("LivePages = %d, want %d", got, want)
+	}
+}
+
 // growTo calls grow once and fails the test unless it returns want.
 func growTo(t *testing.T, a *Arena, want int) {
 	t.Helper()
@@ -139,9 +146,11 @@ func TestAllocFreeAndSteal(t *testing.T) {
 	alloc(0, 1, 1)
 	alloc(0, 2, 1)
 	alloc(0, 3, 1)
+	wantLive(t, a, 3)
 
 	a.free(0, 2)
 	a.free(0, 1)
+	wantLive(t, a, 1)
 	for _, tc := range []struct {
 		id      uint32
 		wantNil bool
@@ -153,8 +162,10 @@ func TestAllocFreeAndSteal(t *testing.T) {
 
 	alloc(1, 1, 3)
 	alloc(0, 2, 3)
+	wantLive(t, a, 3)
 
 	a.free(0, 3)
+	wantLive(t, a, 2)
 	mustPanic(t, func() { a.free(0, 3) })
 }
 
@@ -168,7 +179,7 @@ func TestAllocUntilFull(t *testing.T) {
 	a.shards = make([]shard, 1)
 
 	var freedID uint32
-	for i := 0; i < int(page.PagesPerSlab)-1; i++ {
+	for i := range int(page.PagesPerSlab) - 1 {
 		id, _, err := a.alloc(0)
 		if err != nil {
 			t.Fatalf("alloc(%d): %v", i, err)
@@ -179,6 +190,7 @@ func TestAllocUntilFull(t *testing.T) {
 	if _, _, err := a.alloc(0); !errors.Is(err, ErrArenaFull) {
 		t.Fatalf("alloc() error = %v, want %v", err, ErrArenaFull)
 	}
+	wantLive(t, a, page.PagesPerSlab-1)
 
 	a.free(0, freedID)
 	if _, _, err := a.alloc(0); err != nil {
@@ -250,4 +262,28 @@ func TestConcurrentAllocFreeNoDuplicateAndIncreasingGen(t *testing.T) {
 		}(w)
 	}
 	wg.Wait()
+}
+
+func TestCloseRefusesOpenWorkers(t *testing.T) {
+	a, err := New(page.SlabBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := a.NewWorker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); !errors.Is(err, ErrWorkersOpen) {
+		t.Fatalf("Close with an open worker: got %v, want ErrWorkerOpen", err)
+	}
+
+	if _, _, err := w.Alloc(); err != nil {
+		t.Fatalf("Alloc after refused Close: %v", err)
+	}
+
+	w.Close()
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close after worker closed : %v", err)
+	}
 }

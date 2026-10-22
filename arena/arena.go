@@ -21,6 +21,7 @@ var (
 	ErrArenaFull      = errors.New("arena: full")
 	ErrClosed         = errors.New("arena: closed")
 	ErrTooManyWorkers = errors.New("arena: too many workers")
+	ErrWorkersOpen    = errors.New("arena: workers still open")
 )
 
 // split returns the slab number and the byte offset inside that slab for page id.
@@ -29,13 +30,14 @@ func split(id uint32) (slab, off int) {
 }
 
 type Arena struct {
-	mu        sync.Mutex // serializes grow, Close and worker registration; guards closed, freeSlots
-	slabs     atomic.Pointer[[][]byte]
-	maxSlabs  int
-	closed    bool
-	shards    []shard
-	next      atomic.Uint64
-	freeSlots []int // worker slot numbers not in use
+	mu         sync.Mutex // serializes grow, Close and worker registration; guards closed, freeSlots
+	slabs      atomic.Pointer[[][]byte]
+	maxSlabs   int
+	closed     bool
+	shards     []shard
+	next       atomic.Uint64
+	freeSlots  []int // worker slot numbers not in use
+	maxWorkers int   // len(freeSlots) when no worker is open; fixed at New
 }
 
 // New returns an empty arena that may grow to at most maxBytes of slabs.
@@ -49,7 +51,8 @@ func New(maxBytes int64) (*Arena, error) {
 	a.slabs.Store(&empty)
 	a.shards = make([]shard, runtime.GOMAXPROCS(0))
 	maxWorkers := 4 * runtime.GOMAXPROCS(0)
-	a.freeSlots = make([]int, maxWorkers)
+	a.maxWorkers = maxWorkers
+	a.freeSlots = make([]int, a.maxWorkers)
 	for i := range a.freeSlots {
 		a.freeSlots[i] = len(a.freeSlots) - 1 - i
 	}
@@ -111,6 +114,9 @@ func (a *Arena) growTo(slab int) error {
 func (a *Arena) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if len(a.freeSlots) != a.maxWorkers {
+		return ErrWorkersOpen
+	}
 	a.closed = true
 
 	old := *a.slabs.Load()
@@ -144,4 +150,18 @@ func (a *Arena) popFree(s int) uint32 {
 		}
 	}
 	return 0
+}
+
+// LivePages counts pages that are allocated and not freed (odd gen).
+// It looks at every page ever handed out, so it is slow: tests only.
+func (a *Arena) LivePages() int {
+	n := a.next.Load()
+	count := 0
+	for id := uint64(1); id <= n; id++ {
+		p := a.resolve(uint32(id))
+		if p != nil && p.Gen()&1 == 1 {
+			count++
+		}
+	}
+	return count
 }

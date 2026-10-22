@@ -2,7 +2,9 @@ package page
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -216,5 +218,79 @@ func TestUpdateOverflow(t *testing.T) {
 			t.Errorf("old value changed after a rejected Update")
 		}
 		mustCheck(t, p)
+	})
+}
+
+func TestAppendOverflowIDs(t *testing.T) {
+	t.Run("no overflow records", func(t *testing.T) {
+		src := newMemPages()
+		env := &Env{Scratch: newTestPage(), Pages: src}
+		p := newLeaf(t)
+		for _, k := range []string{"a", "b"} {
+			if err := p.Insert([]byte(k), []byte("small"), env); err != nil {
+				t.Fatalf("Insert(%q): %v", k, err)
+			}
+		}
+		ids, err := p.AppendOverflowIDs(nil, src)
+		if err != nil || len(ids) != 0 {
+			t.Fatalf("AppendOverflowIDs = %v, %v; want [], nil", ids, err)
+		}
+	})
+
+	t.Run("one chain, then broken chains", func(t *testing.T) {
+		src := newMemPages()
+		env := &Env{Scratch: newTestPage(), Pages: src}
+		p := newLeaf(t)
+		val := make([]byte, 20000)
+		if err := p.Insert([]byte("big"), val, env); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+
+		ids, err := p.AppendOverflowIDs(nil, src)
+		if err != nil {
+			t.Fatalf("AppendOverflowIDs: %v", err)
+		}
+		want := overflowPages(len(val)) // 3 on 8K, 5 on 4K
+		if len(ids) != want {
+			t.Fatalf("got %d IDs %v, want %d", len(ids), ids, want)
+		}
+		seen := map[uint32]bool{}
+		for _, id := range ids {
+			if seen[id] {
+				t.Fatalf("duplicate ID %d in %v", id, ids)
+			}
+			seen[id] = true
+		}
+
+		// It appends: existing dst entries are kept, in front.
+		got, err := p.AppendOverflowIDs([]uint32{99}, src)
+		if err != nil || len(got) != want+1 || got[0] != 99 {
+			t.Fatalf("append to non-empty dst = %v, %v", got, err)
+		}
+
+		// Too short: cut the chain after its 2nd page.
+		src.Page(ids[1]).SetLink(0)
+		if _, err := p.AppendOverflowIDs(nil, src); !errors.Is(err, ErrPageInvariant) {
+			t.Fatalf("short chain: got %v, want ErrPageInvariant", err)
+		}
+		src.Page(ids[1]).SetLink(uint64(ids[2])) // restore
+
+		// Too long: the last page links on to a spare overflow page.
+		spare, err := writeChain(src, []byte("spare"))
+		if err != nil {
+			t.Fatalf("writeChain: %v", err)
+		}
+		last := src.Page(ids[len(ids)-1])
+		last.SetLink(uint64(spare))
+		if _, err := p.AppendOverflowIDs(nil, src); !errors.Is(err, ErrPageInvariant) {
+			t.Fatalf("long chain: got %v, want ErrPageInvariant", err)
+		}
+		last.SetLink(0) // restore
+
+		// Restored: valid again, same IDs, same order.
+		again, err := p.AppendOverflowIDs(nil, src)
+		if err != nil || !slices.Equal(again, ids) {
+			t.Fatalf("after restore = %v, %v; want %v, nil", again, err, ids)
+		}
 	})
 }
