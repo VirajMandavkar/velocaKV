@@ -16,10 +16,12 @@ type Worker struct {
 	scratchID uint32
 	env       page.Env
 	closed    bool
-	path      [maxHeight]desc // inner pages on the last descent, root first
-	depth     int             // how many entries of path are valid
-	keyBuf    []byte          // scratch for full keys; cap page.MaxKeyLen
-	sepBuf    []byte          // the current split separator; cap page.MaxKeyLen
+	path      [maxHeight]desc                     // inner pages on the last descent, root first
+	depth     int                                 // how many entries of path are valid
+	keyBuf    []byte                              // scratch for full keys; cap page.MaxKeyLen
+	sep       [maxHeight + 1][page.MaxKeyLen]byte // separator buffer per level
+	spare     [maxHeight + 1]uint32               // reserved page IDs
+	nspare    int                                 // how many are reserved
 }
 
 // NewWorker returns a Worker with its own scratch page.
@@ -41,7 +43,6 @@ func (t *Tree) NewWorker() (*Worker, error) {
 		env:       page.Env{Scratch: p, Pages: aw},
 		closed:    false,
 		keyBuf:    make([]byte, 0, page.MaxKeyLen),
-		sepBuf:    make([]byte, 0, page.MaxKeyLen),
 	}, nil
 }
 
@@ -52,6 +53,7 @@ func (w *Worker) Close() {
 		return
 	}
 	w.closed = true
+	w.release()
 	w.aw.Free(w.scratchID)
 	w.aw.Close()
 }

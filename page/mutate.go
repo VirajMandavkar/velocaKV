@@ -203,7 +203,7 @@ func (p *Page) insertNew(idx int, suffix, val []byte, env *Env) error {
 //	Out:  nil, or:
 //	      ErrNoPages    an overflow chain must be written or freed, but
 //	                    env.Pages is nil (checked before anything is touched)
-//	      ErrNeedSplit  the bigger value doesn't fit even after compaction;
+//	      ErrNeedSplit  the bigger value does not fit even after compaction;
 //	                    the old value is still live and unchanged
 //	      ErrNoScratch  compaction was needed but env.Scratch is missing
 //	      any error from env.Pages.Alloc while writing the new chain

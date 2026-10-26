@@ -47,7 +47,9 @@ func (c *checker) walk(d desc, low, high []byte, highInf bool, depth int) error 
 		return err
 	}
 	if err := p.Check(); err != nil {
-		return fmt.Errorf("page %d: %w", d.id(), err)
+		h, inf := p.HighFence()
+		return fmt.Errorf("page %d (kind %d, depth %d, prefix %q, fences [%q, %q) inf=%v, parent routes [%q, %q)): %w",
+			d.id(), p.Kind(), depth, p.Prefix(), p.LowFence(), h, inf, low, high, err)
 	}
 
 	// The page's fences must be exactly the range its parent routes to it.

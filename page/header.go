@@ -94,7 +94,7 @@ func (p *Page) word(off int) *uint64 { return (*uint64)(unsafe.Pointer(&p[off]))
 // get loads the word at off atomically and extracts one field from it.
 //
 //	In:   off    word offset (word1, word5, word6)
-//	      shift  bit position of the field's lowest bit inside the word
+//	      shift  bit position of the fields lowest bit inside the word
 //	      mask   field width mask (mask8, mask16, mask32)
 //	Out:  the field value in the low bits; all higher bits are 0
 //	Rules: lock-free. The value is from one consistent instant of that word.
@@ -110,7 +110,7 @@ func (p *Page) get(off, shift int, mask uint64) uint64 {
 //	Rules:
 //	  - The caller must hold the page write lock. Load and store are two
 //	    separate steps, so two concurrent setters on the same word would
-//	    overwrite each other's change (lost update).
+//	    overwrite each others change (lost update).
 //	  - The store is atomic, so a lock-free reader sees either the whole old
 //	    word or the whole new word, never a torn mix.
 func (p *Page) set(off, shift int, mask, v uint64) {
@@ -127,7 +127,7 @@ func (p *Page) set(off, shift int, mask, v uint64) {
 //
 //	Out:   0 for a page never handed out; otherwise how many times the
 //	       allocator has handed this page out (wraps at 2^32)
-//	Rules: the arena's allocator is the only writer. A (gen, pageID)
+//	Rules: the arenas allocator is the only writer. A (gen, pageID)
 //	       reference whose gen differs from Gen() points at a recycled page.
 func (p *Page) Gen() uint32 { return uint32(p.get(word1, shiftGen, mask32)) }
 
@@ -242,7 +242,7 @@ func (p *Page) SetPrefixLen(v uint16) { p.set(word6, shiftPrefixLen, mask16, uin
 //	Out:  a page ID in the low 32 bits; the high 32 bits are 0
 //	Who uses it:
 //	  - live overflow page: next page of the big value
-//	  - free page: next page on the arena's free list
+//	  - free page: next page on the arenas free list
 //	The two uses never overlap, because a page is either live or free.
 //	Rules: lock-free (one atomic load), so the free list may read it on a
 //	       page another goroutine just took.
@@ -251,7 +251,7 @@ func (p *Page) Link() uint64 { return atomic.LoadUint64(p.word(word2)) }
 // SetLink stores the next page ID (0 = end of chain).
 //
 //	In:    v  a page ID (must fit in 32 bits)
-//	Rules: one atomic store. Only the page's current owner writes it:
+//	Rules: one atomic store. Only the pages current owner writes it:
 //	       the overflow writer while the page is live, the free list while
 //	       it is free.
 func (p *Page) SetLink(v uint64) { atomic.StoreUint64(p.word(word2), v) }
@@ -269,11 +269,11 @@ func (p *Page) SetLink(v uint64) { atomic.StoreUint64(p.word(word2), v) }
 // target was recycled). Init resets both words to 0.
 // ---------------------------------------------------------------------------
 
-// RightSib returns the descriptor of this page's right sibling: the next
+// RightSib returns the descriptor of this pages right sibling: the next
 // page on the same tree level (B-link). 0 means none (rightmost page).
 //
 //	Rules: lock-free (one atomic load). A reader that finds a key at or
-//	       above this page's high fence follows this link (move right).
+//	       above this pages high fence follows this link (move right).
 func (p *Page) RightSib() uint64 { return atomic.LoadUint64(p.word(word3)) }
 
 // SetRightSib stores the right sibling's descriptor (0 = none).

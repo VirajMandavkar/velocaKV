@@ -70,41 +70,6 @@ func TestRootSplit(t *testing.T) {
 	}
 }
 
-func TestSplitBelowRootRefusedCleanly(t *testing.T) {
-	_, w := newOpsWorker(t)
-
-	i := 0
-	for ; ; i++ {
-		err := w.Put(key(i), val16)
-		if errors.Is(err, errNeedsParent) {
-			break
-		}
-		if err != nil {
-			t.Fatalf("Put(%q): %v", key(i), err)
-		}
-		if i > 3*perLeaf {
-			t.Fatal("no errNeedsParent: the right leaf never filled")
-		}
-	}
-
-	m := perLeaf / 2
-	sepLen := commonPrefix(key(m-1), key(m)) + 1
-	rightCap := (page.Usable - sepLen) / (page.SlotSize + 8 + 16)
-	if want := m + rightCap; i != want {
-		t.Fatalf("refused at key %d, want %d (= %d + %d)", i, want, m, rightCap)
-	}
-
-	if err := checkTree(w, 1); err != nil {
-		t.Fatalf("checkTree after refused split: %v", err)
-	}
-	for j := range i {
-		mustGet(t, w, key(j), val16)
-	}
-	if _, err := w.Get(key(i), nil); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("refused key: Get = %v, want ErrNotFound", err)
-	}
-}
-
 func TestRootSplitMovesOverflowStubs(t *testing.T) {
 	tr, w := newOpsWorker(t)
 	big := func(i int) []byte {
@@ -134,5 +99,32 @@ func TestRootSplitMovesOverflowStubs(t *testing.T) {
 		if err != nil || !bytes.Equal(got, big(i)) {
 			t.Fatalf("Get(%q): %d bytes, %v", key(i), len(got), err)
 		}
+	}
+}
+
+func TestInsertSepCutByPrefix(t *testing.T) {
+	_, w := newOpsWorker(t)
+	p, _ := newPage(t, w, page.KindInner, "key-0040", "key-0050")
+	if got := string(p.Prefix()); got != "key-00" {
+		t.Fatalf("prefix = %q, want key-00 ", got)
+	}
+
+	const child = desc(0x00000001_00000007)
+	if err := w.insertSep(p, []byte("key-0042"), child); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := string(p.KeyAt(0, nil)); got != "key-0042" {
+		t.Fatalf("KeyAt(0) = %q, want %q", got, "key-0042")
+	}
+	if got, ok := p.ChildAt(0); !ok || desc(got) != child {
+		t.Fatalf("ChildAt(0) = %#x, false; want %#x", got, uint64(child))
+	}
+	if err := p.Check(); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	if err := w.insertSep(p, []byte("key"), child); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("short key: got %v, want ErrCorupt", err)
 	}
 }

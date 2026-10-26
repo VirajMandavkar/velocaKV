@@ -47,13 +47,23 @@ func (p *Page) Route(suffix []byte) (child uint64, ok bool) {
 // ChildAt returns the child desc stored in inner slot i. ok is false if the
 // record does not hold exactly 8 bytes. The caller checks i < SlotCount.
 func (p *Page) ChildAt(i int) (child uint64, ok bool) {
-	// s := slot i
-	// if not exactly 8 value bytes, or OVF set → 0, false
-	// read 8 bytes after the key, little-endian
 	s := p.slotAt(i)
 	if s.valLen() != childDescSize || s.ovf() {
 		return 0, false
 	}
 	off := s.off() + s.keyLen()
 	return binary.LittleEndian.Uint64(p[off : off+childDescSize]), true
+}
+
+// SetChildAt overwrites the child desc of inner slot i in place. The record
+// keeps its size, so no slot or heap byte moves. ok is false if slot i does
+// not hold exactly an 8-byte desc. The caller checks i < SlotCount.
+func (p *Page) SetChildAt(i int, child uint64) (ok bool) {
+	s := p.slotAt(i)
+	if s.valLen() != childDescSize || s.ovf() {
+		return false
+	}
+	off := s.off() + s.keyLen()
+	binary.LittleEndian.PutUint64(p[off:off+childDescSize], child)
+	return true
 }
