@@ -9,13 +9,6 @@ import (
 	"velocakv/page"
 )
 
-func wantLive(t *testing.T, a *Arena, want int) {
-	t.Helper()
-	if got := a.LivePages(); got != want {
-		t.Fatalf("LivePages = %d, want %d", got, want)
-	}
-}
-
 // growTo calls grow once and fails the test unless it returns want.
 func growTo(t *testing.T, a *Arena, want int) {
 	t.Helper()
@@ -30,6 +23,14 @@ func growErr(t *testing.T, a *Arena, target error) {
 	t.Helper()
 	if _, err := a.grow(); !errors.Is(err, target) {
 		t.Fatalf("grow() error = %v, want %v", err, target)
+	}
+}
+
+func wantStats(t *testing.T, a *Arena, slabs, handed, live, free int) {
+	t.Helper()
+	s := a.Stats()
+	if s.Slabs != slabs || s.HandedOut != handed || s.Live != live || s.Free != free {
+		t.Fatalf("Stats = %+v\nwant slabs %d, handedOut %d, live %d, free %d", s, slabs, handed, live, free)
 	}
 }
 
@@ -126,6 +127,11 @@ func TestAllocFreeAndSteal(t *testing.T) {
 	t.Cleanup(func() { _ = a.Close() })
 	a.shards = make([]shard, 2)
 
+	if s := a.Stats(); s.MaxSlabs != 2 || s.Capacity != 2*int(page.PagesPerSlab)-1 {
+		t.Fatalf("fresh arena: %+v; want MaxSlabs 2, Capacity %d", s, 2*int(page.PagesPerSlab)-1)
+	}
+	wantStats(t, a, 0, 0, 0, 0) // nothing mapped until the first alloc
+
 	alloc := func(worker int, wantID uint32, wantGen uint32) {
 		t.Helper()
 		id, p, err := a.alloc(worker)
@@ -146,11 +152,14 @@ func TestAllocFreeAndSteal(t *testing.T) {
 	alloc(0, 1, 1)
 	alloc(0, 2, 1)
 	alloc(0, 3, 1)
-	wantLive(t, a, 3)
+
+	wantStats(t, a, 1, 3, 3, 0) // first alloc mapped slab 0
 
 	a.free(0, 2)
 	a.free(0, 1)
-	wantLive(t, a, 1)
+
+	wantStats(t, a, 1, 3, 1, 2) // 2 pages on the free lists
+
 	for _, tc := range []struct {
 		id      uint32
 		wantNil bool
@@ -162,11 +171,13 @@ func TestAllocFreeAndSteal(t *testing.T) {
 
 	alloc(1, 1, 3)
 	alloc(0, 2, 3)
-	wantLive(t, a, 3)
+
+	wantStats(t, a, 1, 3, 3, 0) // reused: HandedOut did not grow
 
 	a.free(0, 3)
-	wantLive(t, a, 2)
+
 	mustPanic(t, func() { a.free(0, 3) })
+	wantStats(t, a, 1, 3, 2, 1) // the refused double free changed nothing
 }
 
 func TestAllocUntilFull(t *testing.T) {
@@ -190,7 +201,11 @@ func TestAllocUntilFull(t *testing.T) {
 	if _, _, err := a.alloc(0); !errors.Is(err, ErrArenaFull) {
 		t.Fatalf("alloc() error = %v, want %v", err, ErrArenaFull)
 	}
-	wantLive(t, a, page.PagesPerSlab-1)
+	if got := a.next.Load(); got != page.PagesPerSlab {
+		t.Fatalf("next = %d, want %d", got, page.PagesPerSlab)
+	}
+	full := int(page.PagesPerSlab) - 1
+	wantStats(t, a, 1, full, full, 0)
 
 	a.free(0, freedID)
 	if _, _, err := a.alloc(0); err != nil {

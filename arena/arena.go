@@ -24,11 +24,6 @@ var (
 	ErrWorkersOpen    = errors.New("arena: workers still open")
 )
 
-// split returns the slab number and the byte offset inside that slab for page id.
-func split(id uint32) (slab, off int) {
-	return int(id >> idShift), int(id&idMask) << page.PageBits
-}
-
 type Arena struct {
 	mu         sync.Mutex // serializes grow, Close and worker registration; guards closed, freeSlots
 	slabs      atomic.Pointer[[][]byte]
@@ -38,6 +33,22 @@ type Arena struct {
 	next       atomic.Uint64
 	freeSlots  []int // worker slot numbers not in use
 	maxWorkers int   // len(freeSlots) when no worker is open; fixed at New
+}
+
+// Stats is a snapshot of the arena's page usage. It scans every page
+// (through LivePages), so it is for tests and diagnostics only.
+type Stats struct {
+	Slabs     int // slabs mapped
+	MaxSlabs  int // slabs the arena may grow to
+	Capacity  int // pages it can ever hand out (ID 0 is reserved)
+	HandedOut int // fresh page IDs given out so far, capped at Capacity
+	Live      int // allocated and not freed (odd gen)
+	Free      int // handed out and freed: on the free lists
+}
+
+// split returns the slab number and the byte offset inside that slab for page id.
+func split(id uint32) (slab, off int) {
+	return int(id >> idShift), int(id&idMask) << page.PageBits
 }
 
 // New returns an empty arena that may grow to at most maxBytes of slabs.
@@ -164,4 +175,23 @@ func (a *Arena) LivePages() int {
 		}
 	}
 	return count
+}
+
+func (a *Arena) Stats() Stats {
+	// capacity := maxSlabs * PagesPerSlab - 1
+	// handed := next, but no more than capacity      (next overshoots after a failed alloc)
+	// live := LivePages()
+	// return Stats{…, Free: handed - live}
+	capacity := a.maxSlabs*int(page.PagesPerSlab) - 1
+	handed := min(int(a.next.Load()), capacity)
+	live := a.LivePages()
+
+	return Stats{
+		Slabs:     len(*a.slabs.Load()),
+		MaxSlabs:  a.maxSlabs,
+		Capacity:  capacity,
+		HandedOut: handed,
+		Live:      live,
+		Free:      handed - live,
+	}
 }
