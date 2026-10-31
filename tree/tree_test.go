@@ -92,3 +92,51 @@ func TestCheckKey(t *testing.T) {
 		}
 	}
 }
+
+// Two Workers, used one after another, share one tree: each has its own
+// scratch page and reservations, and checkTree's accounting counts both.
+func TestTwoWorkers(t *testing.T) {
+	tr := newTestTree(t)
+	w1, err := tr.NewWorker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(w1.Close)
+	w2, err := tr.NewWorker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(w2.Close) // second Close is a no-op if the test closes it first
+
+	const n = 10_000
+	for i := range n { // w1 builds the tree: many splits
+		if err := w1.Put(key11(i), val16); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := checkTree(w1, 2); err != nil { // two scratch pages live
+		t.Fatalf("checkTree(w1, 2): %v", err)
+	}
+
+	for i := range n { // w2 sees everything w1 wrote
+		mustGet(t, w2, key11(i), val16)
+	}
+	for i := n; i < 2*n; i++ { // w2 splits with its own scratch and reservation
+		if err := w2.Put(key11(i), val16); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, w := range []*Worker{w1, w2} { // either worker sees one consistent tree
+		if err := checkTree(w, 2); err != nil {
+			t.Fatalf("checkTree with 2 workers: %v", err)
+		}
+	}
+	if keys, _ := scanAll(t, w1, nil, nil); len(keys) != 2*n {
+		t.Fatalf("w1 scans %d keys, want %d", len(keys), 2*n)
+	}
+
+	w2.Close() // its scratch page is freed: one worker left
+	if err := checkTree(w1, 1); err != nil {
+		t.Fatalf("checkTree(w1, 1) after w2.Close: %v", err)
+	}
+}

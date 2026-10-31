@@ -225,14 +225,14 @@ func TestConcurrentAllocFreeNoDuplicateAndIncreasingGen(t *testing.T) {
 	lastGen := make([]atomic.Uint32, maxID)
 
 	var wg sync.WaitGroup
-	for w := 0; w < 8; w++ {
+	for w := range 8 {
 		wg.Add(1)
 		go func(worker int) {
 			defer wg.Done()
 
 			s := worker % len(a.shards)
 			hand := make([]uint32, 0, 16)
-			for i := 0; i < 50_000; i++ {
+			for i := range 50_000 {
 				if len(hand) < 16 {
 					id, p, err := a.alloc(s)
 					if err != nil {

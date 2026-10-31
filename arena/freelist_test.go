@@ -86,10 +86,10 @@ func TestFreeListConcurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
-	for w := 0; w < workers; w++ {
+	for range workers {
 		go func() {
 			defer wg.Done()
-			for i := 0; i < iters; i++ {
+			for range iters {
 				id := l.pop(a)
 				if id == 0 {
 					t.Errorf("free list unexpectedly empty")

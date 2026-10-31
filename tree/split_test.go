@@ -145,3 +145,63 @@ func TestInsertSepCutByPrefix(t *testing.T) {
 		t.Fatalf("short key: got %v, want ErrCorupt", err)
 	}
 }
+
+func TestUpdateTriggersRootSplit(t *testing.T) {
+	tr, w := newOpsWorker(t)
+	for i := range perLeaf {
+		if err := w.Put(key(i), val16); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldRoot := desc(tr.root.Load())
+
+	big := bytes.Repeat([]byte("G"), 100)
+	if err := w.Put(key(10), big); err != nil {
+		t.Fatalf("growing update: %v", err)
+	}
+
+	if desc(tr.root.Load()) == oldRoot {
+		t.Fatalf("no split: the grown value should not have fitted")
+	}
+	if err := checkTree(w, 1); err != nil {
+		t.Fatalf("checkTree: %v", err)
+	}
+	mustGet(t, w, key(10), big)
+	for i := range perLeaf {
+		if i != 10 {
+			mustGet(t, w, key(i), val16)
+		}
+	}
+	if keys, _ := scanAll(t, w, nil, nil); len(keys) != perLeaf {
+		t.Fatalf("%d keys after the update, want %d (no duplicate, no loss)", len(keys), perLeaf)
+	}
+}
+
+func TestUpdatesSplitDeepLeaves(t *testing.T) {
+	_, w := newOpsWorker(t)
+	const n = 20_000
+	for i := range n {
+		if err := w.Put(key11(i), val16); err != nil {
+			t.Fatal(err)
+		}
+	}
+	big := bytes.Repeat([]byte("G"), 200)
+	for i := 0; i < n; i += 50 {
+		if err := w.Put(key11(i), big); err != nil {
+			t.Fatalf("grow %q: %v", key11(i), err)
+		}
+	}
+	if err := checkTree(w, 1); err != nil {
+		t.Fatalf("checkTree: %v", err)
+	}
+	for i := range n {
+		want := val16
+		if i%50 == 0 {
+			want = big
+		}
+		mustGet(t, w, key11(i), want)
+	}
+	if keys, _ := scanAll(t, w, nil, nil); len(keys) != n {
+		t.Fatalf("%d keys, want %d", len(keys), n)
+	}
+}
