@@ -110,6 +110,45 @@ func (p *Page) valueBytes(s slot) []byte {
 	return p[start : start+s.valLen()]
 }
 
+// valueOf appends the value described by slot s to dst: the inline bytes, ot
+// the whole overflow chain followed through env.Pages. Shared by Get and ValueAt,
+// so there is one way to read a value
+func (p *Page) valueOf(s slot, dst []byte, env *Env) ([]byte, error) {
+	if !s.ovf() {
+		return append(dst, p.valueBytes(s)...), nil
+	}
+	if env == nil || env.Pages == nil {
+		return dst, ErrNoPages
+	}
+	head, total := readStub(p.valueBytes(s))
+	out, ok := readChain(env.Pages, head, total, dst)
+	if !ok {
+		return dst, ErrPageInvariant
+	}
+	return out, nil
+}
+
+// ValueAt appends the value of slot i to dst (inline butes or overflow chain)
+// The caller checks i < SlotCount
+func (p *Page) ValueAt(i int, dst []byte, env *Env) ([]byte, error) {
+	s := p.slotAt(i)
+	if !recordOK(s, int(p.HeapStart())) {
+		return dst, ErrPageInvariant
+	}
+	return p.valueOf(s, dst, env)
+}
+
+// SuffixAt returns the stored key of slot i, without the page prefix. The
+// slice points into the page: valid only until the page changes. ok is false if
+// the slot does not describe a readable record. The caller checks i < SlotCount
+func (p *Page) SuffixAt(i int) (suffix []byte, ok bool) {
+	s := p.slotAt(i)
+	if !recordOK(s, int(p.HeapStart())) {
+		return nil, false
+	}
+	return p[s.off() : s.off()+s.keyLen()], true
+}
+
 // makeRoom ensures need bytes of free space, compacting if that is enough.
 // It returns ErrNeedSplit when even compaction would not make room.
 func (p *Page) makeRoom(need int, env *Env) error {
@@ -369,20 +408,7 @@ func (p *Page) Get(suffix, dst []byte, env *Env) ([]byte, error) {
 	if !found {
 		return dst, ErrKeyNotFound
 	}
-
-	if !s.ovf() {
-		return append(dst, p.valueBytes(s)...), nil
-	}
-
-	if env == nil || env.Pages == nil {
-		return dst, ErrNoPages
-	}
-	head, total := readStub(p.valueBytes(s))
-	out, ok := readChain(env.Pages, head, total, dst)
-	if !ok {
-		return dst, ErrPageInvariant // the stub and the chain disagree
-	}
-	return out, nil
+	return p.valueOf(s, dst, env)
 }
 
 // Put stores val under suffix: it inserts the key if it is new, and

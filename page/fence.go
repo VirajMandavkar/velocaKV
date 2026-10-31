@@ -91,7 +91,7 @@ func (p *Page) fenceBytes() int {
 // commonPrefixLen returns how many leading bytes a and b share.
 func commonPrefixLen(a, b []byte) int {
 	n := min(len(a), len(b))
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if a[i] != b[i] {
 			return i
 		}

@@ -101,7 +101,7 @@ func TestKeyHeadOrder(t *testing.T) {
 		}
 		return b
 	}
-	for i := 0; i < 200000; i++ {
+	for range 200000 {
 		a, b := key(), key()
 		ha, hb := keyHead(a), keyHead(b)
 		full := bytes.Compare(a, b)

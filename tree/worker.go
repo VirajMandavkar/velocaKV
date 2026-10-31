@@ -22,6 +22,8 @@ type Worker struct {
 	sep       [maxHeight + 1][page.MaxKeyLen]byte // separator buffer per level
 	spare     [maxHeight + 1]uint32               // reserved page IDs
 	nspare    int                                 // how many are reserved
+	valBuf    []byte                              // value buffer for Scan; grows to the largest value once, then reused
+	err       error                               // the error from the last Range loop, read with Err
 }
 
 // NewWorker returns a Worker with its own scratch page.

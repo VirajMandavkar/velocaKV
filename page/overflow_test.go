@@ -69,7 +69,7 @@ func TestChainRoundTrip(t *testing.T) {
 func TestWriteChainAllocFails(t *testing.T) {
 	val := make([]byte, 20000)
 	pages := overflowPages(len(val)) // 3 on 8 KiB, 5 on 4 KiB
-	for fail := 0; fail < pages; fail++ {
+	for fail := range pages {
 		t.Run(fmt.Sprint("fail after ", fail), func(t *testing.T) {
 			src := newMemPages()
 			src.failAfter = fail

@@ -124,7 +124,7 @@ func TestFillArenaUntilFull(t *testing.T) {
 	// 1–2. Fill, logging a row at every 10% of capacity.
 	failedAt, nextPct := -1, 10
 	var failErr error
-	for n := 0; n < 1<<22; n++ {
+	for n := range 1 << 22 {
 		k, x := fillKey(n)
 		if err := w.Put(k, val(x)); err != nil {
 			failedAt, failErr = n, err
