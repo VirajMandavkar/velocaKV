@@ -108,7 +108,8 @@ func TestCheckCatches(t *testing.T) {
 		corrupt func(p *Page)
 	}{
 		{"unknown kind", func(p *Page) { p.SetKind(3) }},
-		{"unknown flag bit", func(p *Page) { p.SetFlags(1 << 2) }},
+		{"unknown flag bit", func(p *Page) { p.SetFlags(1 << 3) }},
+		{"invalid insert hint", func(p *Page) { p.SetFlags(3 << hintShift) }},
 		{"slots run into heap", func(p *Page) { p.SetSlotCount(uint16((int(p.HeapStart())-HeaderSize)/SlotSize + 1)) }},
 		{"heapStart past page end", func(p *Page) { p.SetHeapStart(PageSize + 1) }},
 		{"low fence below heapStart", func(p *Page) { p.SetLowFenceOff(p.HeapStart() - 1) }},

@@ -113,8 +113,12 @@ func (p *Page) Check() error {
 	if kind > KindOverflow {
 		return fmt.Errorf("%w: unknown kind %d", ErrPageInvariant, kind)
 	}
-	if f := p.Flags(); f&^FlagAppendHint != 0 {
+	f := p.Flags()
+	if f&^hintMask != 0 {
 		return fmt.Errorf("%w: unknown flag bits %#x", ErrPageInvariant, f)
+	}
+	if f&hintMask == 3<<hintShift {
+		return fmt.Errorf("%w: invalid insert hint (end and front at once)", ErrPageInvariant)
 	}
 
 	// Layout: slots end before the heap starts; the heap ends at the page end.

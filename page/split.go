@@ -107,3 +107,19 @@ func (p *Page) Adopt(src *Page) {
 	w1 |= uint64(gen) << shiftGen // put P's gen back
 	atomic.StoreUint64(p.word(word1), w1)
 }
+
+// SplitPointFor returns where to split 'p' before inserting a new key that
+// would land at the slot newIdx. After ordered inserts (the hint says the last
+// new key want to this same end) it splits next to that end , leaving the
+// other half neaerly full; otherwise it is the byte median . p holds at least
+// 2 records
+func (p *Page) SplitPointFor(newIdx int) int {
+	n := int(p.SlotCount())
+	switch h := p.hint(); {
+	case h == hintEnd && newIdx == n:
+		return n - 1
+	case h == hintFront && newIdx == 0:
+		return 1
+	}
+	return p.SplitPoint()
+}

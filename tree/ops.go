@@ -32,7 +32,7 @@ func (w *Worker) Put(key, val []byte) error {
 		if !errors.Is(err, page.ErrNeedSplit) {
 			return err
 		}
-		if err := w.split(p, d); err != nil {
+		if err := w.split(p, d, key); err != nil {
 			return err
 		}
 	}

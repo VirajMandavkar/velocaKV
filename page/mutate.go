@@ -81,7 +81,16 @@ func (p *Page) insertAt(idx int, suffix, val []byte, ovf bool) {
 	off := p.carve(suffix, val)
 	p.shiftRight(idx, int(n))
 	p.setSlotAt(idx, makeSlot(off, len(suffix), len(val), ovf, keyHead(suffix)))
-	p.SetSlotCount(n + 1)
+
+	hint := uint8(hintNone)
+	switch {
+	case n == 0:
+	case idx == int(n):
+		hint = hintEnd
+	case idx == 0:
+		hint = hintFront
+	}
+	p.setCountAndHint(n+1, hint)
 }
 
 // replaceAt writes a fresh copy of the record at slot idx and repoints the

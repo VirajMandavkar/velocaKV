@@ -56,6 +56,19 @@ func (w *Worker) peekSpare() (*page.Page, desc) {
 	return p, makeDesc(id, p.Gen())
 }
 
+// slotFor returns the slot a new key (full key) would take in p
+func (w *Worker) slotFor(p *page.Page, key []byte) (int, error) {
+	suffix, err := cutKey(p, key)
+	if err != nil {
+		return 0, err
+	}
+	idx, _, ok := p.SeekSlot(suffix)
+	if !ok {
+		return 0, fmt.Errorf("%w: seek failed on a page being split", ErrCorrupt)
+	}
+	return idx, nil
+}
+
 // ---------- split ----------
 
 // splitPage splits the full page p (desc d, leaf or inner) at its byte
@@ -69,10 +82,10 @@ func (w *Worker) peekSpare() (*page.Page, desc) {
 //
 // p is not modified until R is complete. On error p is unchanged and the
 // caller still owns R.
-func (w *Worker) splitPage(p *page.Page, d desc, R *page.Page, rd desc, buf []byte) ([]byte, error) {
+func (w *Worker) splitPage(p *page.Page, d desc, R *page.Page, rd desc, buf []byte, newIdx int) ([]byte, error) {
 	kind := p.Kind()
 	n := int(p.SlotCount())
-	m := p.SplitPoint()
+	m := p.SplitPointFor(newIdx)
 
 	var sep []byte
 	var leftUpper uint64
@@ -199,15 +212,19 @@ func (w *Worker) addChild(parent *page.Page, sep []byte, left, right desc) error
 //
 // Every page the climb may need (depth + 2) is reserved first, so a failure
 // to allocate changes nothing.
-func (w *Worker) split(p *page.Page, d desc) error {
+func (w *Worker) split(p *page.Page, d desc, key []byte) error {
 	if err := w.reserve(w.depth + 2); err != nil {
 		return err
 	}
 	defer w.release()
 
 	level := w.depth
+	newIdx, err := w.slotFor(p, key)
+	if err != nil {
+		return err
+	}
 	R, rd := w.peekSpare()
-	sep, err := w.splitPage(p, d, R, rd, w.sep[level][:])
+	sep, err := w.splitPage(p, d, R, rd, w.sep[level][:], newIdx)
 	if err != nil {
 		return err
 	}
@@ -229,8 +246,12 @@ func (w *Worker) split(p *page.Page, d desc) error {
 			return err
 		}
 
+		pIdx, err := w.slotFor(parent, sep)
+		if err != nil {
+			return err
+		}
 		PR, prd := w.peekSpare()
-		psep, err := w.splitPage(parent, pd, PR, prd, w.sep[level-1][:])
+		psep, err := w.splitPage(parent, pd, PR, prd, w.sep[level-1][:], pIdx)
 		if err != nil {
 			return err
 		}

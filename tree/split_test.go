@@ -14,20 +14,24 @@ const perLeaf = page.Usable / (page.SlotSize + 8 + 16)
 
 func key(i int) []byte { return fmt.Appendf(nil, "key-%04d", i) }
 
-func TestRootSplit(t *testing.T) {
+func sepBetween(a, b []byte) []byte { return b[:commonPrefix(a, b)+1] }
+
+// rootSplitCase fills the root leaf with fill keys in order, then puts last,
+// which must split the root. It checks the new root, the halves and the tree.
+func rootSplitCase(t *testing.T, fill []int, last, wantLeft, wantRight int, wantSep []byte) {
+	t.Helper()
 	tr, w := newOpsWorker(t)
 	oldRoot := desc(tr.root.Load())
 
-	for i := range perLeaf {
+	for _, i := range fill {
 		if err := w.Put(key(i), val16); err != nil {
 			t.Fatalf("Put(%q): %v", key(i), err)
 		}
 	}
 	if desc(tr.root.Load()) != oldRoot {
-		t.Fatalf("root split before the leaf was full (%d keys)", perLeaf)
+		t.Fatalf("root split before the leaf was full (%d key)", len(fill))
 	}
-
-	if err := w.Put(key(perLeaf), val16); err != nil {
+	if err := w.Put(key(last), val16); err != nil {
 		t.Fatalf("Put that splits the root: %v", err)
 	}
 
@@ -38,13 +42,9 @@ func TestRootSplit(t *testing.T) {
 	if root.Kind() != page.KindInner || root.SlotCount() != 1 {
 		t.Fatalf("new root: kind %d, %d separators; want inner, 1", root.Kind(), root.SlotCount())
 	}
-
-	m := perLeaf / 2
-	wantSep := key(m)[:commonPrefix(key(m-1), key(m))+1]
 	if sep := root.KeyAt(0, nil); !bytes.Equal(sep, wantSep) {
 		t.Fatalf("separator = %q, want %q", sep, wantSep)
 	}
-
 	child, _ := root.ChildAt(0)
 	if desc(child) != oldRoot {
 		t.Fatalf("left child = %#x, want the old root %#x", child, uint64(oldRoot))
@@ -54,15 +54,13 @@ func TestRootSplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if l, r := int(left.SlotCount()), int(right.SlotCount()); l != m || r != perLeaf-m+1 {
-		t.Fatalf("left %d, right %d records; want %d, %d", l, r, m, perLeaf-m+1)
+	if l, r := int(left.SlotCount()), int(right.SlotCount()); l != wantLeft || r != wantRight {
+		t.Fatalf("left %d, right %d records; want %d, %d", l, r, wantLeft, wantRight)
 	}
-
 	if err := checkTree(w, 1); err != nil {
 		t.Fatalf("checkTree after root split: %v", err)
 	}
-	for i := 0; i <= perLeaf; i++ {
+	for _, i := range append(fill, last) {
 		mustGet(t, w, key(i), val16)
 	}
 	if live := tr.a.LivePages(); live != 4 {
@@ -70,6 +68,25 @@ func TestRootSplit(t *testing.T) {
 	}
 }
 
+func TestRootSplit(t *testing.T) {
+	t.Run("append splits at the end", func(t *testing.T) {
+		fill := make([]int, perLeaf)
+		for i := range fill {
+			fill[i] = i
+		}
+		n := perLeaf
+		rootSplitCase(t, fill, n, n-1, 2, sepBetween(key(n-2), key(n-1)))
+	})
+
+	t.Run("middle insert splits at the byte median", func(t *testing.T) {
+		fill := make([]int, perLeaf)
+		for i := range fill {
+			fill[i] = 2 * i
+		}
+		m := perLeaf / 2
+		rootSplitCase(t, fill, 1, m+1, perLeaf-m, sepBetween(key(fill[m-1]), key(fill[m])))
+	})
+}
 func TestRootSplitMovesOverflowStubs(t *testing.T) {
 	tr, w := newOpsWorker(t)
 	big := func(i int) []byte {

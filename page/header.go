@@ -38,8 +38,16 @@ const (
 	KindOverflow = 2 // holds one piece of a big value; no slots, no fences
 )
 
-// Page flags, stored in header byte 13.
-const FlagAppendHint = 1 << 1 // the last insert went at the end (split hint)
+// Insert hint: a 2-bit field in flags (bits 1-2) recording where the last
+// NEW key landed. The split reads it to keep pages full under ordered inserts.
+const (
+	hintShift = 1
+	hintMask  = 3 << hintShift // the whole field
+	hintNone  = 0 << hintShift // middle, or empty page
+	hintEnd   = 1 << hintShift // last new key went at idx == n
+	hintFront = 2 << hintShift // last new key went at idx == 0
+	// 3 << hintShift is invalid: Check rejects it
+)
 
 // Byte offset where each header word starts.
 const (
@@ -141,6 +149,9 @@ func (p *Page) Flags() uint8 { return uint8(p.get(word1, shiftFlags, mask8)) }
 // Slot i lives at byte HeaderSize + 8*i.
 func (p *Page) SlotCount() uint16 { return uint16(p.get(word1, shiftSlotCount, mask16)) }
 
+// hint returns the insert-hint field (hintNone, hintEnd or hintFront)
+func (p *Page) hint() uint8 { return p.Flags() & hintMask }
+
 // SetGen overwrites the reuse counter.
 //
 //	In:    v  new gen
@@ -159,6 +170,16 @@ func (p *Page) SetFlags(v uint8) { p.set(word1, shiftFlags, mask8, uint64(v)) }
 //	Rules: HeaderSize + 8*v must not exceed HeapStart(); slots and heap
 //	       must never overlap (page.Check invariant 1).
 func (p *Page) SetSlotCount(v uint16) { p.set(word1, shiftSlotCount, mask16, uint64(v)) }
+
+// setCountAndHint stores the slot count and the insert hint with ONE atomic
+// store of word 1: the two always change together. Gen, kind and the other
+// flag bits are kept
+func (p *Page) setCountAndHint(n uint16, hint uint8) {
+	w := atomic.LoadUint64(p.word(word1))
+	w = w&^(mask16<<shiftSlotCount) | uint64(n)<<shiftSlotCount
+	w = w&^(uint64(hintMask)<<shiftFlags) | uint64(hint)<<shiftFlags
+	atomic.StoreUint64(p.word(word1), w)
+}
 
 // ---------------------------------------------------------------------------
 // Word 5: heapStart | deadBytes | lowFenceOff | lowFenceLen.

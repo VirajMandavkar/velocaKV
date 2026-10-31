@@ -182,3 +182,56 @@ func TestFillArenaUntilFull(t *testing.T) {
 	}
 	t.Logf("recovered: freed %d overflow pages, the refused Put went through", freed)
 }
+
+// Ordered loads must use about as few leaves as possible (append/prepend
+// hint); random loads keep the usual B-tree fill.
+//
+// Under an ordered load the active page is open-ended (one fence is
+// infinite), so its prefix is empty and it stores whole keys: it fills at
+// capPerLeaf records. A split then re-cuts the left page's keys to a longer
+// prefix, so the measured fill drops to ~77%, but the page already holds
+// all it could while it was active. The bound is therefore on leaves, not
+// fill.
+func TestLeafFillByOrder(t *testing.T) {
+	const n = 100_000
+	const recBytes = 11 + 16 + page.SlotSize    // whole key + value + slot
+	capPerLeaf := (page.Usable - 11) / recBytes // one finite 11-byte fence on the active page
+	best := (n + capPerLeaf - 1) / capPerLeaf   // fewest leaves possible
+	limit := best * 105 / 100                   // 5% slack: the last leaf is partly full
+
+	orders := []struct {
+		name string
+		key  func(i int) []byte
+	}{
+		{"sequential", func(i int) []byte { return key11(i) }},
+		{"reverse", func(i int) []byte { return key11(n - 1 - i) }},
+		{"random", func(i int) []byte { k, _ := fillKey(i); return k }},
+	}
+	for _, o := range orders {
+		t.Run(o.name, func(t *testing.T) {
+			tr, w := newOpsWorker(t)
+			for i := range n {
+				if err := w.Put(o.key(i), val16); err != nil {
+					t.Fatalf("Put #%d: %v", i, err)
+				}
+			}
+			if err := checkTree(w, 1); err != nil {
+				t.Fatal(err)
+			}
+			st := collectStats(t, w)
+			t.Logf("leaves %d (best %d), inner %d, leaf fill %.1f%%, live pages %d",
+				st.Leaves, best, st.Inners, st.LeafFill*100, tr.a.LivePages())
+
+			if o.name == "random" {
+				if st.LeafFill < 0.50 || st.LeafFill > 0.85 {
+					t.Fatalf("random leaf fill %.1f%%, want 50–85%%", st.LeafFill*100)
+				}
+				return
+			}
+			if st.Leaves > limit {
+				t.Fatalf("%d leaves, want at most %d (5%% over the best %d): the ordered-load hint did not fire",
+					st.Leaves, limit, best)
+			}
+		})
+	}
+}
